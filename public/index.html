@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scan &amp; Herken</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside id="zijbalk">
+    <div class="merk">Scan &amp; Herken</div>
+    <label class="veld">
+      <span>Administratie</span>
+      <select id="adminKeuze"></select>
+    </label>
+    <button id="nieuweAdmin" class="knop klein">+ Nieuwe administratie</button>
+    <nav id="menu">
+      <a href="#/documenten">Documenten</a>
+      <a href="#/export">Export naar Exact</a>
+      <div class="kop">Instellingen</div>
+      <a href="#/profiel">Bedrijfsprofiel</a>
+      <a href="#/grootboek">Rekeningschema</a>
+      <a href="#/btwcodes">Btw-codes</a>
+      <a href="#/relaties">Relaties</a>
+    </nav>
+    <div id="model" class="voet"></div>
+  </aside>
+  <main id="inhoud"></main>
+  <div id="melding" hidden></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
