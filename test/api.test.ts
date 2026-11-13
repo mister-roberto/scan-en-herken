@@ -58,6 +58,44 @@ test("volledige doorloop: aanleveren, uitlezen, goedkeuren, exporteren", async (
     assert.ok(lijst.every((d) => d.status === "geexporteerd"));
     assert.equal((await json(`/administraties/${admin.id}/export`, "POST", { formaat: "xml" })).status, 400);
 
+    // Een goedgekeurde of geëxporteerde boeking kan niet stilletjes worden gewijzigd of opnieuw goedgekeurd.
+    const vastDoc = (await json(`/documenten/${lijst[1].id}`)).data;
+    assert.equal((await json(`/documenten/${vastDoc.id}/boeking`, "PUT", vastDoc.boeking)).status, 400);
+    assert.equal((await json(`/documenten/${vastDoc.id}/goedkeuren`, "POST")).status, 400);
+    assert.equal((await fetch(`${basis}/documenten/${vastDoc.id}/bestand`)).status, 200);
+
+    // Feedback: een correctie wordt een leerpunt en het volgende document van die relatie gaat direct goed.
+    const tank = async (naam: string) => {
+      const f = new FormData();
+      f.append("bestanden", new Blob([naam], { type: "application/pdf" }), naam);
+      const [nieuw] = (await (await fetch(`${basis}/administraties/${admin.id}/documenten`, { method: "POST", body: f })).json()) as any[];
+      for (let i = 0; i < 50; i++) {
+        const d = (await json(`/documenten/${nieuw.id}`)).data;
+        if (d.status !== "wachtrij" && d.status !== "bezig") return d;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      throw new Error("niet uitgelezen");
+    };
+    const bon1 = await tank("shell-tankbon.pdf");
+    assert.equal(bon1.boeking.regels[0].grootboek, "4590");
+    bon1.boeking.regels[0].grootboek = "4300";
+    const gewijzigd = (await json(`/documenten/${bon1.id}/boeking`, "PUT", bon1.boeking)).data;
+    assert.equal(gewijzigd.correcties.length, 1);
+    assert.equal((await json(`/documenten/${bon1.id}/feedback`, "POST", { tekst: "Tankbonnen altijd op brandstof.", bereik: "relatie" })).status, 200);
+    assert.equal((await json(`/documenten/${bon1.id}/feedback`, "POST", { tekst: " " })).status, 400);
+    assert.equal((await json(`/documenten/${bon1.id}/goedkeuren`, "POST")).status, 200);
+
+    const fb = (await json(`/administraties/${admin.id}/feedback`)).data;
+    assert.deepEqual(fb.feedback.map((f: any) => f.bron).sort(), ["automatisch", "handmatig"]);
+    assert.equal(fb.kwaliteit.beoordeeld, 4);
+    assert.equal(fb.kwaliteit.zonderCorrectie, 3);
+    assert.equal(fb.kwaliteit.percentage, 75);
+    assert.equal(fb.kwaliteit.vaakGecorrigeerd[0].naam, "Shell Station De Meern");
+
+    const bon2 = await tank("shell-tankbon-2.pdf");
+    assert.equal(bon2.boeking.regels[0].grootboek, "4300");
+    assert.deepEqual(bon2.correcties, []);
+
     // Een aangepaste boeking met een fout kan niet worden goedgekeurd.
     const doc = (await json(`/documenten/${lijst[0].id}/heropenen`, "POST")).data;
     doc.boeking.totaalIncl += 100;

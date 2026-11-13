@@ -6,7 +6,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import { BEHANDELINGEN } from "./btw.ts";
-import type { Extractie, Grootboekrekening, Profiel, Relatie } from "./types.ts";
+import type { Extractie, Feedback, Grootboekrekening, Profiel, Relatie } from "./types.ts";
 
 export const MODEL = process.env.SCAN_MODEL || "claude-opus-5-5";
 /** Modellen waarbij de API een geweigerd verzoek zelf op een ander model mag herhalen. */
@@ -51,6 +51,7 @@ export const ExtractieSchema = z.object({
   omschrijving: z.string().describe("Korte boekingsomschrijving, maximaal 60 tekens"),
   zekerheid: z.enum(["hoog", "middel", "laag"]),
   onzekerheden: z.array(z.string()).describe("Concrete twijfelpunten die een mens moet controleren; leeg als er geen zijn"),
+  vermeldingen: z.array(z.string()).describe("Letterlijke btw-vermeldingen op het document, bv. 'btw verlegd', 'margeregeling', 'vrijgesteld van btw'; leeg als er geen zijn"),
 });
 
 const SYSTEEM = `Je verwerkt inkoop- en verkoopdocumenten (facturen, creditnota's en kassabonnen) voor een Nederlandse boekhouding. Jouw uitkomst wordt een boekingsvoorstel dat een boekhouder controleert en daarna in Exact Online importeert. Een fout in een bedrag, datum of btw-behandeling komt dus in de btw-aangifte terecht; nauwkeurigheid gaat boven volledigheid.
@@ -77,6 +78,7 @@ Kies de behandeling die bij de feiten op het document past:
 - EU_DIENSTEN: dienst van een ondernemer in een andere EU-lidstaat zonder btw (reverse charge); bij verkoop: dienst aan een ondernemer in een andere lidstaat.
 - NIET_EU_DIENSTEN: dienst van of aan een ondernemer buiten de EU zonder btw (bv. software-abonnement van een Amerikaanse leverancier).
 - INVOER: goederen van een leverancier buiten de EU (alleen inkoop). EXPORT: goederen naar een afnemer buiten de EU (alleen verkoop).
+- Staat op het document dat de margeregeling of de reisbureauregeling is toegepast, dan is er geen aftrekbare btw: kies GEEN_BTW en neem de vermelding op in vermeldingen.
 - BUITENLANDSE_BTW: er staat btw van een ander land op het document (bv. een Duits hotel of tanken in België). btwBedrag is die buitenlandse btw.
 - NIET_AFTREKBAAR: er staat Nederlandse btw op, maar die is niet aftrekbaar. Gebruik dit voor eten en drinken in horeca (restaurant, café, hotelontbijt). Andere aftrekbeperkingen beoordeelt het programma zelf aan de hand van het profiel.
 Let op het verschil tussen een buitenlandse leverancier die Nederlandse btw rekent met een Nederlands btw-nummer (dan NL_HOOG/NL_LAAG) en een buitenlandse leverancier die niets rekent (verlegd).
@@ -84,12 +86,15 @@ Let op het verschil tussen een buitenlandse leverancier die Nederlandse btw reke
 Geef bij categorie aan waar de regel over gaat: horeca (eten en drinken ter plaatse), logies (overnachting), relatiegeschenk, personeelsvoorziening (bv. kerstpakket, personeelsuitje, fiets), auto (brandstof, onderhoud, lease van een personenauto), investering (duurzaam bedrijfsmiddel van enige omvang), anders overig.
 
 ## Grootboekrekening
-Kies per regel de best passende code uit het rekeningschema van de administratie, op basis van wat er is gekocht of verkocht, de activiteiten van het bedrijf en de instructies in het profiel. Instructies in het profiel en bij een bekende relatie gaan voor op je eigen inschatting. Staat er geen passende rekening in het schema, laat de code dan leeg; verzin geen codes.
+Kies per regel de best passende code uit het rekeningschema van de administratie, op basis van wat er is gekocht of verkocht, de activiteiten van het bedrijf en de instructies in het profiel. Instructies in het profiel en bij een bekende relatie gaan voor op je eigen inschatting.
+
+## Feedback van de boekhouder
+Je kunt feedback krijgen op eerder verwerkte documenten: correcties die de boekhouder op een voorstel heeft aangebracht en aanwijzingen die hij heeft opgeschreven. Dat is de belangrijkste bron om van te leren hoe deze administratie boekt. Pas feedback toe op elk document waarvoor zij redelijkerwijs geldt: feedback bij een relatie op documenten van die relatie, algemene feedback op alle vergelijkbare situaties. Feedback gaat voor op je eigen inschatting, maar verandert niets aan wat er feitelijk op het document staat. Staat er geen passende rekening in het schema, laat de code dan leeg; verzin geen codes.
 
 ## Onzekerheden
 Noem alleen punten die een boekhouder echt moet nakijken: een slecht leesbaar bedrag, een totaal dat niet aansluit op de regels van het document, een ontbrekend btw-nummer bij verlegging, twijfel tussen twee rekeningen of btw-behandelingen. Schrijf ze in het Nederlands, kort en concreet. Zet zekerheid op "laag" als je kernvelden (totaal, btw, datum, leverancier) niet betrouwbaar kon lezen.`;
 
-function contextTekst(profiel: Profiel, grootboek: Grootboekrekening[], relaties: Relatie[]): string {
+function contextTekst(profiel: Profiel, grootboek: Grootboekrekening[], relaties: Relatie[], feedback: Feedback[]): string {
   const status = {
     normaal: "btw-plichtig met volledig aftrekrecht",
     kor: "past de kleineondernemersregeling toe (geen btw op verkoop, geen aftrek)",
@@ -122,12 +127,24 @@ function contextTekst(profiel: Profiel, grootboek: Grootboekrekening[], relaties
       regels.push(`- ${delen.join("; ")}`);
     }
   }
+  const actief = feedback.filter((f) => f.actief && f.tekst.trim()).slice(0, 300);
+  if (actief.length) {
+    regels.push("\n# Feedback van de boekhouder op eerder verwerkte documenten");
+    const algemeen = actief.filter((f) => f.bereik === "administratie");
+    const perRelatie = actief.filter((f) => f.bereik === "relatie");
+    if (algemeen.length) regels.push("Geldt voor alle documenten:", ...algemeen.map((f) => `- ${f.tekst}`));
+    if (perRelatie.length) regels.push("Geldt voor documenten van de genoemde relatie:", ...perRelatie.map((f) => `- ${f.relatieNaam}: ${f.tekst}`));
+  }
   return regels.filter(Boolean).join("\n");
 }
 
 export interface ExtractieInvoer {
   bestand: Buffer;
+  bestandsnaam: string;
   mime: string;
+  feedback: Feedback[];
+  /** Aanwijzing van de boekhouder bij het opnieuw uitlezen van juist dit document. */
+  aanwijzing: string;
   profiel: Profiel;
   grootboek: Grootboekrekening[];
   relaties: Relatie[];
@@ -160,9 +177,16 @@ async function vraag(invoer: ExtractieInvoer, herkansing?: string): Promise<Extr
         role: "user",
         content: [
           // Profiel eerst en gecachet: het is voor elk document van deze administratie gelijk.
-          { type: "text", text: contextTekst(invoer.profiel, invoer.grootboek, invoer.relaties), cache_control: { type: "ephemeral" } },
+          { type: "text", text: contextTekst(invoer.profiel, invoer.grootboek, invoer.relaties, invoer.feedback), cache_control: { type: "ephemeral" } },
           document,
-          { type: "text", text: herkansing ?? "Lees dit document uit en maak het boekingsvoorstel voor deze administratie." },
+          {
+            type: "text",
+            text:
+              (herkansing ?? "Lees dit document uit en maak het boekingsvoorstel voor deze administratie.") +
+              (invoer.aanwijzing
+                ? `\n\nDe boekhouder heeft een eerder voorstel voor dit document afgekeurd en geeft deze aanwijzing; volg die:\n${invoer.aanwijzing}`
+                : ""),
+          },
         ],
       },
     ],
@@ -199,24 +223,35 @@ export function vertaalApiFout(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** Vaste voorbeelden om het programma zonder API-sleutel te kunnen uitproberen (SCAN_DEMO=1). */
+/**
+ * Vaste voorbeelden om het programma zonder API-sleutel te kunnen uitproberen (SCAN_DEMO=1).
+ * De bestanden in de map voorbeelden/ worden aan hun naam herkend; andere bestanden krijgen
+ * om de beurt een voorbeeld. Er wordt niets gelezen: dit laat alleen de werkwijze zien.
+ */
 let demoTeller = 0;
-export const demoExtractor: Extractor = async ({ profiel }) => {
-  await new Promise((r) => setTimeout(r, 600));
+export const demoExtractor: Extractor = async ({ bestandsnaam, profiel, relaties, feedback, aanwijzing }) => {
+  await new Promise((r) => setTimeout(r, 900));
   const leeg = { adres: null, landcode: "NL", btwNummer: null, kvkNummer: null, iban: null };
-  const afnemer = { ...leeg, naam: profiel.naam, btwNummer: profiel.btwNummer || null };
   const basis = {
-    afnemer,
+    afnemer: { ...leeg, naam: profiel.naam, btwNummer: profiel.btwNummer || null },
     valuta: "EUR",
     btwVerlegdVermeld: false,
     betaalwijze: "bankoverschrijving" as const,
     betalingskenmerk: null,
     zekerheid: "hoog" as const,
     onzekerheden: [],
+    vermeldingen: [],
     vervaldatum: null,
   };
-  const voorbeelden: Extractie[] = [
-    {
+  // Net als de echte AI houdt het voorbeeld rekening met wat over de relatie is geleerd.
+  const geleerd = (naam: string, standaard: string) => {
+    const tekst = [aanwijzing, ...feedback.filter((f) => f.actief && (f.bereik === "administratie" || naam.startsWith(f.relatieNaam.split(" ")[0] ?? "~"))).map((f) => f.tekst)].join(" ");
+    const genoemd = /\b(\d{4})\b(?!.*\b\d{4}\b)/.exec(tekst)?.[1];
+    return genoemd ?? relaties.find((r) => r.naam === naam)?.standaardGrootboek ?? standaard;
+  };
+  const tweede = /2/.test(bestandsnaam);
+  const voorbeelden: Record<string, Extractie> = {
+    pen: {
       ...basis,
       documentType: "inkoopfactuur",
       afzender: { ...leeg, naam: "Kantoorhandel De Pen B.V.", btwNummer: "NL123456789B01", kvkNummer: "12345678", iban: "NL91ABNA0417164300" },
@@ -232,38 +267,61 @@ export const demoExtractor: Extractor = async ({ profiel }) => {
       totaalIncl: 272.3,
       omschrijving: "Kantoorartikelen november",
     },
-    {
+    lepel: {
       ...basis,
       documentType: "bon",
       afzender: { ...leeg, naam: "Restaurant De Gouden Lepel", btwNummer: "NL001234567B02" },
       afnemer: { ...leeg, naam: "" },
       factuurnummer: "B-88213",
       factuurdatum: "2026-11-06",
-      regels: [
-        { omschrijving: "Lunch met relatie", bedragExcl: 61.47, btwPercentage: 9, btwBedrag: 5.53, btwBehandeling: "NIET_AFTREKBAAR", categorie: "horeca", grootboekCode: "4240" },
-      ],
+      regels: [{ omschrijving: "Lunch met relatie", bedragExcl: 61.47, btwPercentage: 9, btwBedrag: 5.53, btwBehandeling: "NL_LAAG", categorie: "horeca", grootboekCode: "4240" }],
       totaalExcl: 61.47,
       totaalBtw: 5.53,
       totaalIncl: 67,
       betaalwijze: "pin",
       omschrijving: "Zakenlunch",
     },
-    {
+    cloudsoft: {
       ...basis,
       documentType: "inkoopfactuur",
       afzender: { ...leeg, naam: "CloudSoft Ireland Ltd", landcode: "IE", btwNummer: "IE3668997OH" },
       factuurnummer: "INV-778123",
       factuurdatum: "2026-11-01",
-      regels: [
-        { omschrijving: "Software-abonnement november", bedragExcl: 120, btwPercentage: 0, btwBedrag: 0, btwBehandeling: "EU_DIENSTEN", categorie: "overig", grootboekCode: "4420" },
-      ],
+      regels: [{ omschrijving: "Software-abonnement november", bedragExcl: 120, btwPercentage: 0, btwBedrag: 0, btwBehandeling: "EU_DIENSTEN", categorie: "overig", grootboekCode: "4420" }],
       totaalExcl: 120,
       totaalBtw: 0,
       totaalIncl: 120,
       btwVerlegdVermeld: true,
+      vermeldingen: ["VAT reverse charged"],
       betaalwijze: "creditcard",
       omschrijving: "Software-abonnement",
     },
-  ];
-  return voorbeelden[demoTeller++ % voorbeelden.length]!;
+    shell: {
+      ...basis,
+      documentType: "bon",
+      afzender: { ...leeg, naam: "Shell Station De Meern", btwNummer: "NL004455667B01" },
+      afnemer: { ...leeg, naam: "" },
+      factuurnummer: tweede ? "T-551204" : "T-550871",
+      factuurdatum: tweede ? "2026-11-12" : "2026-11-05",
+      regels: [
+        {
+          omschrijving: "Diesel",
+          bedragExcl: tweede ? 70 : 60,
+          btwPercentage: 21,
+          btwBedrag: tweede ? 14.7 : 12.6,
+          btwBehandeling: "NL_HOOG",
+          categorie: "auto",
+          grootboekCode: geleerd("Shell Station De Meern", "4590"),
+        },
+      ],
+      totaalExcl: tweede ? 70 : 60,
+      totaalBtw: tweede ? 14.7 : 12.6,
+      totaalIncl: tweede ? 84.7 : 72.6,
+      betaalwijze: "pin",
+      omschrijving: "Brandstof",
+    },
+  };
+  const sleutels = Object.keys(voorbeelden);
+  const sleutel = sleutels.find((k) => bestandsnaam.toLowerCase().includes(k)) ?? sleutels[demoTeller++ % 3]!;
+  return voorbeelden[sleutel]!;
 };

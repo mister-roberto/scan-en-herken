@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BEHANDELINGEN, behandeling, isBehandeling, normaliseerBtwNummer } from "./btw.ts";
-import { maakBoeking, maakJournaalpost, zelfdeNaam, zoekRelatie } from "./boeking.ts";
+import { maakBoeking, maakJournaalpost, verschillen, zelfdeNaam, zoekRelatie } from "./boeking.ts";
 import { NietGevonden, Opslag } from "./db.ts";
 import { btwSleutel, controleerExport, exactCsv, exactRegels, exactXml, journaalCsv } from "./exact.ts";
 import { MODEL, ONDERSTEUNDE_TYPES, demoExtractor, extraheerMetClaude, vertaalApiFout, type Extractor } from "./extract.ts";
@@ -62,14 +62,17 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
         try {
           const extractie = await extractor({
             bestand: fs.readFileSync(doc.pad),
+            bestandsnaam: doc.bestandsnaam,
             mime: doc.mime,
+            feedback: opslag.feedback(doc.adminId),
+            aanwijzing: doc.aanwijzing,
             profiel: opslag.profiel(doc.adminId),
             grootboek: opslag.grootboek(doc.adminId),
             relaties: opslag.relaties(doc.adminId),
           });
           const { boeking, meldingen } = maakBoeking(extractie, opslag.profiel(doc.adminId), opslag.relaties(doc.adminId), opslag.grootboek(doc.adminId));
           const signaleringen = controleer({ ...doc, extractie }, boeking, meldingen);
-          opslag.werkDocumentBij(doc.id, { extractie, boeking, signaleringen, status: statusNaControle(signaleringen) });
+          opslag.werkDocumentBij(doc.id, { extractie, boeking, aiVoorstel: boeking, gecorrigeerd: null, signaleringen, status: statusNaControle(signaleringen) });
         } catch (e) {
           console.error(`Document ${doc.id}:`, e);
           opslag.werkDocumentBij(doc.id, { status: "fout", fout: vertaalApiFout(e) });
@@ -81,11 +84,13 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
   }
 
   const uitvoer = (d: Document) => {
-    const { pad, hash, ...rest } = d;
+    const { pad, hash, aiVoorstel, ...rest } = d;
     const profiel = opslag.profiel(d.adminId);
     return {
       ...rest,
       journaalpost: d.boeking ? maakJournaalpost(d.boeking, profiel) : [],
+      correcties: d.boeking && d.aiVoorstel ? verschillen(d.aiVoorstel, d.boeking, opslag.grootboek(d.adminId)) : [],
+      feedback: opslag.feedback(d.adminId).filter((f) => f.documentId === d.id),
       exactRegels: d.boeking ? exactRegels(d.boeking, profiel, opslag.btwcodes(d.adminId)) : [],
     };
   };
@@ -281,7 +286,7 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
 
   app.put("/api/documenten/:id/boeking", (req, res) => {
     const doc = opslag.document(id(req.params.id));
-    if (doc.status === "geexporteerd") throw new Ongeldig("Dit document is al geëxporteerd. Heropen het eerst.");
+    if (doc.status === "geexporteerd" || doc.status === "goedgekeurd") throw new Ongeldig("Dit document is al goedgekeurd. Heropen het eerst om het te wijzigen.");
     if (doc.status === "wachtrij" || doc.status === "bezig") throw new Ongeldig("Dit document wordt nog uitgelezen.");
     const boeking = leesBoeking(req.body, doc);
     const signaleringen = controleer(doc, boeking);
@@ -292,6 +297,7 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
   app.post("/api/documenten/:id/goedkeuren", (req, res) => {
     const doc = opslag.document(id(req.params.id));
     if (!doc.boeking) throw new Ongeldig("Er is nog geen boeking om goed te keuren.");
+    if (doc.status === "goedgekeurd" || doc.status === "geexporteerd") throw new Ongeldig("Dit document is al goedgekeurd.");
     const boeking = doc.boeking;
     const signaleringen = controleer(doc, boeking);
     if (heeftFouten(signaleringen)) {
@@ -326,7 +332,14 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
     } else if (!relatie.vast) {
       relatie = opslag.bewaarRelatie({ ...relatie, standaardGrootboek: grootste.grootboek, standaardBtw: grootste.btw });
     }
-    opslag.werkDocumentBij(doc.id, { boeking: { ...boeking, relatieId: relatie.id }, signaleringen, status: "goedgekeurd" });
+    // Correcties op het AI-voorstel worden leerpunten voor volgende documenten van deze relatie.
+    const correcties = doc.aiVoorstel ? verschillen(doc.aiVoorstel, boeking, opslag.grootboek(doc.adminId)) : [];
+    const bestaand = opslag.feedback(doc.adminId);
+    for (const c of correcties.filter((x) => x.soort === "oordeel")) {
+      if (bestaand.some((f) => f.tekst === c.tekst && f.relatieNaam === relatie.naam)) continue;
+      opslag.bewaarFeedback({ adminId: doc.adminId, documentId: doc.id, bereik: "relatie", relatieNaam: relatie.naam, tekst: c.tekst, bron: "automatisch", actief: true, aangemaakt: new Date().toISOString() });
+    }
+    opslag.werkDocumentBij(doc.id, { boeking: { ...boeking, relatieId: relatie.id }, signaleringen, status: "goedgekeurd", gecorrigeerd: correcties.length > 0 || doc.aanwijzing !== "" });
     res.json(uitvoer(opslag.document(doc.id)));
   });
 
@@ -339,8 +352,8 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
   });
   app.post("/api/documenten/:id/opnieuw", (req, res) => {
     const doc = opslag.document(id(req.params.id));
-    if (doc.status === "geexporteerd") throw new Ongeldig("Dit document is al geëxporteerd.");
-    opslag.werkDocumentBij(doc.id, { status: "wachtrij", fout: "" });
+    if (doc.status === "geexporteerd" || doc.status === "goedgekeurd") throw new Ongeldig("Dit document is al goedgekeurd. Heropen het eerst.");
+    opslag.werkDocumentBij(doc.id, { status: "wachtrij", fout: "", aanwijzing: String(req.body?.aanwijzing ?? "").trim() });
     void verwerkWachtrij();
     res.json({ ok: true });
   });
@@ -348,6 +361,50 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
     const doc = opslag.document(id(req.params.id));
     opslag.verwijderDocument(doc.id);
     fs.rmSync(doc.pad, { force: true });
+    res.json({ ok: true });
+  });
+
+  // --- Feedback: wat de AI van de boekhouder moet leren ---
+  app.post("/api/documenten/:id/feedback", (req, res) => {
+    const doc = opslag.document(id(req.params.id));
+    const tekst = String(req.body?.tekst ?? "").trim();
+    if (!tekst) throw new Ongeldig("Schrijf eerst op wat de AI moet leren.");
+    const bereik = req.body?.bereik === "administratie" ? "administratie" : "relatie";
+    const relatieNaam = doc.boeking?.relatieNaam ?? "";
+    if (bereik === "relatie" && !relatieNaam) throw new Ongeldig("Bij dit document is geen relatie bekend; kies 'alle documenten'.");
+    res.json(opslag.bewaarFeedback({ adminId: doc.adminId, documentId: doc.id, bereik, relatieNaam: bereik === "relatie" ? relatieNaam : "", tekst, bron: "handmatig", actief: true, aangemaakt: new Date().toISOString() }));
+  });
+  app.get("/api/administraties/:id/feedback", (req, res) => {
+    const a = id(req.params.id);
+    const beoordeeld = opslag.documenten(a).filter((d) => d.gecorrigeerd !== null && (d.status === "goedgekeurd" || d.status === "geexporteerd"));
+    const zonder = beoordeeld.filter((d) => d.gecorrigeerd === false).length;
+    const perRelatie = new Map<string, { naam: string; totaal: number; gecorrigeerd: number }>();
+    for (const d of beoordeeld) {
+      const naam = d.boeking?.relatieNaam ?? "";
+      const r = perRelatie.get(naam) ?? { naam, totaal: 0, gecorrigeerd: 0 };
+      r.totaal++;
+      if (d.gecorrigeerd) r.gecorrigeerd++;
+      perRelatie.set(naam, r);
+    }
+    res.json({
+      feedback: opslag.feedback(a),
+      kwaliteit: {
+        beoordeeld: beoordeeld.length,
+        zonderCorrectie: zonder,
+        percentage: beoordeeld.length ? Math.round((zonder / beoordeeld.length) * 100) : null,
+        vaakGecorrigeerd: [...perRelatie.values()].filter((r) => r.gecorrigeerd > 0).sort((x, y) => y.gecorrigeerd - x.gecorrigeerd).slice(0, 10),
+      },
+    });
+  });
+  app.put("/api/feedback/:id", (req, res) => {
+    const f = opslag.feedbackItem(id(req.params.id));
+    if (!f) throw new NietGevonden("Feedback niet gevonden");
+    const tekst = String(req.body?.tekst ?? f.tekst).trim();
+    if (!tekst) throw new Ongeldig("De tekst mag niet leeg zijn.");
+    res.json(opslag.bewaarFeedback({ ...f, tekst, actief: Boolean(req.body?.actief ?? f.actief) }));
+  });
+  app.delete("/api/feedback/:id", (req, res) => {
+    opslag.verwijderFeedback(id(req.params.id));
     res.json({ ok: true });
   });
 

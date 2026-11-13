@@ -113,6 +113,8 @@ export interface Extractie {
   omschrijving: string;
   zekerheid: "hoog" | "middel" | "laag";
   onzekerheden: string[];
+  /** Letterlijke btw-vermeldingen op het document, bv. "margeregeling" of "btw verlegd". */
+  vermeldingen?: string[];
 }
 
 export interface BoekingRegel {
@@ -165,6 +167,26 @@ export interface Document {
   fout: string;
   aangemaakt: string;
   geexporteerdOp: string;
+  /** Het boekingsvoorstel zoals de AI het maakte, om correcties van de boekhouder te kunnen zien. */
+  aiVoorstel: Boeking | null;
+  /** Aanwijzing van de boekhouder voor het opnieuw uitlezen van dit document. */
+  aanwijzing: string;
+  /** Bij goedkeuring: moest het AI-voorstel worden aangepast? null = nog niet goedgekeurd. */
+  gecorrigeerd: boolean | null;
+}
+
+/** Leerpunt voor de AI: handmatige feedback van de boekhouder of een automatisch vastgelegde correctie. */
+export interface Feedback {
+  id: number;
+  adminId: number;
+  documentId: number | null;
+  /** "relatie": geldt voor documenten van deze relatie; "administratie": geldt voor alle documenten. */
+  bereik: "relatie" | "administratie";
+  relatieNaam: string;
+  tekst: string;
+  bron: "handmatig" | "automatisch";
+  actief: boolean;
+  aangemaakt: string;
 }
 
 export interface Journaalregel {

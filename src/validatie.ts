@@ -10,7 +10,7 @@ import {
   nlTarieven,
   normaliseerBtwNummer,
 } from "./btw.ts";
-import { maakJournaalpost, zelfdeNaam } from "./boeking.ts";
+import { isGeldigeDatum, maakJournaalpost, zelfdeNaam } from "./boeking.ts";
 import type { Boeking, Extractie, Grootboekrekening, Profiel, Signalering } from "./types.ts";
 
 const euro = (c: number) => (c / 100).toLocaleString("nl-NL", { style: "currency", currency: "EUR" });
@@ -43,7 +43,7 @@ export function valideer(
   // --- Basisgegevens ---
   if (ex?.documentType === "geen_factuur") fout("GEEN_FACTUUR", "Dit document lijkt geen factuur of bon te zijn.");
   if (!b.relatieNaam.trim()) fout("RELATIE", `Geen ${inkoop ? "leverancier" : "afnemer"} herkend.`);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(b.datum) || Number.isNaN(Date.parse(b.datum))) {
+  if (!isGeldigeDatum(b.datum)) {
     fout("DATUM", "Factuurdatum ontbreekt of is ongeldig.");
   } else {
     if (b.datum > ctx.vandaag) let_op("DATUM_TOEKOMST", "De factuurdatum ligt in de toekomst.");
@@ -51,7 +51,10 @@ export function valideer(
       let_op("DATUM_OUD", "De factuurdatum is meer dan vijf jaar oud; aftrek/naheffing kan verjaard zijn.");
     }
   }
+  if (b.vervaldatum && !isGeldigeDatum(b.vervaldatum)) let_op("DATUM", "De vervaldatum is ongeldig.");
+  else if (b.vervaldatum && isGeldigeDatum(b.datum) && b.vervaldatum < b.datum) let_op("DATUM", "De vervaldatum ligt vóór de factuurdatum.");
   if (b.regels.length === 0) fout("REGELS", "Geen boekingsregels.");
+  if (b.creditnota && b.totaalIncl < 0) let_op("CREDITNOTA", "Een creditnota wordt met positieve bedragen vastgelegd; het programma keert de boeking zelf om. Controleer de tekens.");
   if (b.valuta !== "EUR") let_op("VALUTA", `Factuur in ${b.valuta}. Bedragen moeten naar euro worden omgerekend tegen de koers van de factuurdatum; controleer de bedragen.`);
   if (ctx.dubbel) fout("DUBBEL", "Er is al een document met deze relatie en dit factuurnummer. Mogelijk dubbel geboekt.");
 
@@ -185,6 +188,16 @@ export function valideer(
   }
   if (profiel.btwStatus === "gemengd" && aftrekGevraagd) {
     info("PRO_RATA", `Voorbelasting wordt voor ${profiel.proRataPercentage}% in aftrek gebracht (pro rata). Gebruik in Exact een btw-code met hetzelfde aftrekpercentage.`);
+  }
+
+  // --- Bijzondere regelingen die op het document worden genoemd ---
+  const vermeld = (ex?.vermeldingen ?? []).join(" | ").toLowerCase();
+  if (inkoop && /marge/.test(vermeld)) {
+    const metBtw = b.regels.some((r) => r.btwBedrag !== 0 || behandeling(r.btw).aftrekbaar);
+    (metBtw ? fout : let_op)("MARGE", "Op het document staat de margeregeling (art. 28b e.v. Wet OB). Er is geen btw aftrekbaar; boek het hele bedrag met 'Geen btw'.");
+  }
+  if (inkoop && /reisbureau/.test(vermeld)) {
+    let_op("REISBUREAU", "Op het document staat de reisbureauregeling (art. 28z e.v. Wet OB). Er is geen btw aftrekbaar.");
   }
 
   // --- Wat de AI zelf onzeker vond ---

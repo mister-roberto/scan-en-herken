@@ -9,7 +9,7 @@ Facturen en bonnen aanleveren, met AI laten uitlezen, omzetten in journaalposten
 3. **Bedrijfsprofiel** – per administratie legt u vast wat het bedrijf doet, de btw-positie, het rekeningschema, boekingsinstructies en bekende relaties. De AI krijgt dit bij elk document mee.
 4. **Controle volgens de Wet OB** – vaste regels, los van de AI, controleren elk voorstel (zie hieronder).
 5. **Beoordelen** – document en boeking naast elkaar; aanpassen, journaalpost bekijken, goedkeuren.
-6. **Leren** – bij goedkeuring onthoudt het programma hoe een relatie is geboekt.
+6. **Feedback en leren** – elke correctie op een AI-voorstel wordt een leerpunt, en u kunt de AI in eigen woorden iets uitleggen. Zie hieronder.
 7. **Export** – Exact Online XML, CSV, en een journaalpostenoverzicht ter controle.
 
 ## Starten
@@ -49,6 +49,17 @@ Open daarna http://localhost:3000.
 3. **Btw-codes**: vul per btw-behandeling de btw-code uit Exact in (Stamgegevens → Btw-codes). Zonder code wordt een boeking niet geëxporteerd.
 4. **Relaties**: plak de bestaande relaties uit Exact als `code;naam;btw-nummer;soort`, zodat er geen dubbele relaties ontstaan. Nieuwe relaties krijgen een code vanaf het startnummer in het profiel en gaan eenmalig mee in de XML-export.
 
+## Feedback en kwaliteit
+
+- **Automatisch**: kiest u bij het goedkeuren een andere rekening, btw-behandeling of indeling dan de AI voorstelde, dan wordt dat vastgelegd als leerpunt voor die relatie.
+- **In eigen woorden**: bij elk document kunt u opschrijven wat de AI moet leren, voor die relatie of voor alle documenten. Met "Opslaan en opnieuw uitlezen" wordt het document direct opnieuw verwerkt met uw aanwijzing.
+- **Feedback & kwaliteit**: laat zien welk deel van de boekingen zonder correctie is goedgekeurd, bij welke relaties u het vaakst corrigeert en alle leerpunten. Leerpunten kunt u aanscherpen, uitzetten of verwijderen.
+- Actieve leerpunten gaan bij elk volgend document mee naar de AI. Leesfouten (een verkeerd gelezen bedrag of nummer) tellen mee in de kwaliteitscijfers, maar worden geen leerpunt.
+
+## Voorbeelddocumenten
+
+In de map `voorbeelden/` staan vijf oefendocumenten. In de demomodus worden ze aan hun bestandsnaam herkend; de tankbonnen laten zien hoe feedback werkt.
+
 ## Btw-controles
 
 De regels staan in `src/btw.ts`, `src/boeking.ts` en `src/validatie.ts`:
@@ -63,6 +74,19 @@ De regels staan in `src/btw.ts`, `src/boeking.ts` en `src/validatie.ts`:
 - formaat btw-nummer, IBAN-controle, dubbele facturen, datums.
 
 Een **fout** blokkeert de goedkeuring; een **let op** vraagt om een bewuste beoordeling.
+
+### Wat nog niet is verwerkt
+
+Het programma dekt de regels die bij gewone inkoop- en verkoopfacturen het meest voorkomen, niet de volledige Wet OB. Onder meer deze onderwerpen zijn niet of alleen als signaal aanwezig en vragen dus altijd een eigen beoordeling:
+
+- margeregeling en reisbureauregeling (alleen herkend aan de vermelding op het document);
+- onroerend goed: optie belaste verhuur of levering, herziening van aftrek;
+- bijzondere plaats-van-dienstregels (art. 6a e.v.), afstandsverkopen en het éénloketsysteem (OSS), ketentransacties en vereenvoudigde ABC-levering;
+- verlegging per sector in detail (bv. mobiele telefoons boven de drempel), en verlegde of zelf berekende btw tegen 9%;
+- BUA-drempel en privégebruik auto: alleen een signaal, geen berekening;
+- fiscale eenheid, kasstelsel, oninbare vorderingen, vouchers, nieuwe vervoermiddelen, accijnsgoederen, landbouwregeling;
+- welke goederen en diensten precies onder Tabel I (9%) vallen: het tarief op de factuur wordt gevolgd en rekenkundig gecontroleerd, niet inhoudelijk getoetst;
+- suppletie en de aangifte zelf.
 
 ## Over "100% juist"
 

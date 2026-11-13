@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { maakBoeking, maakJournaalpost } from "../src/boeking.ts";
+import { isGeldigeDatum, maakBoeking, maakJournaalpost, verschillen, zelfdeNaam } from "../src/boeking.ts";
 import { isGeldigeIban, isGeldigNlBtwNummer, centen } from "../src/btw.ts";
 import { STANDAARD_GROOTBOEK, standaardProfiel } from "../src/defaults.ts";
 import { controleerExport, exactCsv, exactRegels, exactXml } from "../src/exact.ts";
@@ -170,4 +170,42 @@ test("hulpfuncties", () => {
   assert.equal(centen(272.3), 272_30);
   assert.equal(centen(1.005), 101);
   assert.equal(centen(-61.47), -61_47);
+});
+
+test("creditnota met mintekens op het document wordt niet dubbel omgekeerd", () => {
+  const ex = extractie([{ bedragExcl: -100, btwBedrag: -21 }], { documentType: "creditnota_inkoop" });
+  const { boeking } = boek(ex);
+  assert.equal(boeking.totaalIncl, 121_00);
+  assert.equal(op(boeking, "4400"), -100_00);
+  assert.equal(op(boeking, "1600"), 121_00);
+});
+
+test("onmogelijke datum wordt afgekeurd", () => {
+  assert.equal(isGeldigeDatum("2026-02-28"), true);
+  assert.equal(isGeldigeDatum("2026-02-31"), false);
+  const ex = extractie([{}], { factuurdatum: "2026-02-31" });
+  assert.ok(valideer(boek(ex).boeking, ex, profiel, STANDAARD_GROOTBOEK, ctx).some((s) => s.code === "DATUM" && s.niveau === "fout"));
+});
+
+test("naamherkenning: geen losse overeenkomst midden in de naam", () => {
+  assert.equal(zelfdeNaam("Bouwbedrijf De Vries", "De Vries"), false);
+  assert.equal(zelfdeNaam("Albert Heijn B.V.", "Albert Heijn 1234 Amsterdam"), true);
+  assert.equal(zelfdeNaam("Kantoorhandel De Pen BV", "kantoorhandel de pen b.v."), true);
+  // Een leverancier die toevallig een deel van de eigen naam draagt, is geen verkoopfactuur.
+  const ex = extractie([{}], { afzender: { ...leeg, naam: "Jansen" }, afnemer: { ...leeg, naam: "" } });
+  assert.equal(boek(ex).boeking.soort, "inkoop");
+});
+
+test("margeregeling: geen aftrek van btw", () => {
+  const ex = extractie([{}], { vermeldingen: ["Margeregeling toegepast"] });
+  assert.ok(valideer(boek(ex).boeking, ex, profiel, STANDAARD_GROOTBOEK, ctx).some((s) => s.code === "MARGE" && s.niveau === "fout"));
+});
+
+test("correcties: onderscheid tussen oordeel en leesfout", () => {
+  const ai = boek(extractie([{ grootboekCode: "4590" }])).boeking;
+  const def: Boeking = { ...ai, factuurnummer: "F-2", regels: [{ ...ai.regels[0]!, grootboek: "4300" }] };
+  const v = verschillen(ai, def, STANDAARD_GROOTBOEK);
+  assert.deepEqual(v.map((x) => x.soort).sort(), ["lezing", "oordeel"]);
+  assert.match(v.find((x) => x.soort === "oordeel")!.tekst, /4590 \(Overige algemene kosten\).*4300 \(Brandstof\)/);
+  assert.deepEqual(verschillen(ai, ai, STANDAARD_GROOTBOEK), []);
 });

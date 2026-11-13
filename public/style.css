@@ -15,7 +15,8 @@
   --info-bg: #e8effc;
 }
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html { height: 100%; }
+body { min-height: 100%; }
 body {
   margin: 0; display: flex; background: var(--bg); color: var(--tekst);
   font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -28,7 +29,7 @@ a { color: var(--accent); }
 
 #zijbalk {
   width: 230px; flex: none; background: #172033; color: #d6dcea; padding: 18px 14px;
-  display: flex; flex-direction: column; gap: 10px; position: sticky; top: 0; height: 100vh;
+  display: flex; flex-direction: column; gap: 10px; position: sticky; top: 0; height: 100vh; align-self: flex-start;
 }
 .merk { font-size: 18px; font-weight: 700; color: #fff; margin-bottom: 8px; }
 #zijbalk .veld span { color: #9aa5bf; }
@@ -41,7 +42,7 @@ a { color: var(--accent); }
 #menu .kop { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #7f8aa6; margin: 14px 10px 4px; }
 .voet { margin-top: auto; font-size: 12px; color: #7f8aa6; }
 
-main { flex: 1; min-width: 0; padding: 24px 28px 60px; }
+main { flex: 1; min-width: 0; padding: 24px 28px 60px; overflow-x: clip; }
 .paginakop { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
 .kaart { background: var(--vlak); border: 1px solid var(--rand); border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
 
@@ -99,7 +100,8 @@ td input, td select { padding: 5px 7px; }
 #sleepvak.boven { background: var(--info-bg); border-color: var(--accent); }
 #sleepvak .knoppen { justify-content: center; margin-top: 12px; }
 
-.splits { display: grid; grid-template-columns: minmax(300px, 0.8fr) minmax(520px, 1.4fr); gap: 16px; align-items: start; }
+.splits { display: grid; grid-template-columns: minmax(280px, 0.7fr) minmax(520px, 1.5fr); gap: 16px; align-items: start; }
+.splits > * { min-width: 0; }
 .voorbeeld { position: sticky; top: 16px; height: calc(100vh - 32px); background: #5a6070; border-radius: 10px; overflow: auto; }
 .voorbeeld iframe { width: 100%; height: 100%; border: 0; display: block; }
 .voorbeeld img { width: 100%; display: block; }
@@ -128,11 +130,19 @@ td input, td select { padding: 5px 7px; }
   padding: 10px 18px; border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.25); max-width: 90vw; z-index: 10;
 }
 #melding.fout { background: var(--fout); }
+.tegels { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.tegel { background: var(--vlak); border: 1px solid var(--rand); border-radius: 10px; padding: 14px 16px; }
+.tegel .getal-groot { font-size: 28px; font-weight: 700; line-height: 1.1; }
+.tegel .zacht { font-size: 13px; }
+.correcties { margin: 0 0 12px; padding-left: 18px; }
+.correcties li { margin-bottom: 3px; }
+.label { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px; background: #eceef2; color: #4a556e; margin-left: 6px; white-space: nowrap; }
+.label.leert { background: var(--goed-bg); color: var(--goed); }
 .leeg { text-align: center; padding: 30px 10px; color: var(--zacht); }
 .uitleg { font-size: 13px; color: var(--zacht); }
 .totaalrij td { font-weight: 600; border-top: 2px solid var(--rand); }
 .regels td, .regels th { padding-left: 4px; padding-right: 4px; }
-.regels td:nth-child(1) input { min-width: 120px; }
-.regels td:nth-child(2) select { min-width: 170px; }
-.regels td:nth-child(3) select { min-width: 140px; }
-.regels td:nth-child(4) input, .regels td:nth-child(5) input { min-width: 88px; }
+.regels td:nth-child(1) input { min-width: 100px; }
+.regels td:nth-child(2) select { min-width: 150px; }
+.regels td:nth-child(3) select { min-width: 120px; }
+.regels td:nth-child(4) input, .regels td:nth-child(5) input { min-width: 80px; }

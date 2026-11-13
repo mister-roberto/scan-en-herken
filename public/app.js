@@ -58,6 +58,8 @@ const euro = (c) => (c == null ? "" : (c / 100).toLocaleString("nl-NL", { minimu
 function centen(tekst) {
   let s = String(tekst).trim().replace(/[€\s]/g, "");
   if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  // "1.234" zonder komma is in Nederlandse notatie een duizendtal, geen € 1,23.
+  else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
   const n = Number(s);
   return Number.isFinite(n) ? Math.round(n * 100) : 0;
 }
@@ -105,7 +107,7 @@ $("#nieuweAdmin").addEventListener(
 );
 
 // ---------- Routering ----------
-const paginas = { documenten: paginaDocumenten, document: paginaDocument, export: paginaExport, profiel: paginaProfiel, grootboek: paginaGrootboek, btwcodes: paginaBtwcodes, relaties: paginaRelaties };
+const paginas = { documenten: paginaDocumenten, document: paginaDocument, feedback: paginaFeedback, export: paginaExport, profiel: paginaProfiel, grootboek: paginaGrootboek, btwcodes: paginaBtwcodes, relaties: paginaRelaties };
 
 async function toon() {
   clearTimeout(verversTimer);
@@ -237,9 +239,11 @@ async function paginaDocument(arg) {
 
   const signalenVak = h("div", {});
   const journaalVak = h("div", {});
+  const feedbackVak = h("div", {});
   const statusVak = h("span", {});
   function tekenUitkomst() {
     vul(statusVak, chip(doc.status));
+    tekenFeedback();
     const volgorde = { fout: 0, waarschuwing: 1, info: 2 };
     const titel = { fout: "Fout", waarschuwing: "Let op", info: "Info" };
     const s = [...doc.signaleringen].sort((x, y) => volgorde[x.niveau] - volgorde[y.niveau]);
@@ -262,6 +266,41 @@ async function paginaDocument(arg) {
           h("tr", { class: "totaalrij" }, h("td", { colspan: 2 }, "Totaal"), h("td", { class: "getal" }, euro(doc.journaalpost.reduce((t, j) => t + j.debet, 0))), h("td", { class: "getal" }, euro(doc.journaalpost.reduce((t, j) => t + j.credit, 0)))),
         ),
       ),
+    );
+  }
+
+  // Feedback: wat is er aangepast ten opzichte van het AI-voorstel, en wat moet de AI ervan leren?
+  const feedbackTekst = h("textarea", { rows: 3, placeholder: "Bv. Tankbonnen van Shell altijd op 4300 Brandstof. Of: servicekosten van deze verhuurder apart boeken op 4110." });
+  const feedbackBereik = h("select", { style: "width:auto" }, h("option", { value: "relatie" }, "Geldt voor deze relatie"), h("option", { value: "administratie" }, "Geldt voor alle documenten"));
+  const stuurFeedback = (opnieuw) =>
+    probeer(async () => {
+      const tekst = feedbackTekst.value.trim();
+      if (!tekst) return meld("Schrijf eerst op wat de AI moet leren.", true);
+      await api(`/documenten/${id}/feedback`, "POST", { tekst, bereik: feedbackBereik.value });
+      if (opnieuw) {
+        await api(`/documenten/${id}/opnieuw`, "POST", { aanwijzing: tekst });
+        meld("Feedback opgeslagen; het document wordt opnieuw uitgelezen");
+        return toon();
+      }
+      feedbackTekst.value = "";
+      doc = await api(`/documenten/${id}`);
+      tekenUitkomst();
+      meld("Feedback opgeslagen. De AI gebruikt dit bij volgende documenten.");
+    });
+  function tekenFeedback() {
+    const c = doc.correcties ?? [];
+    vul(
+      feedbackVak,
+      h("h2", {}, "Feedback voor de AI"),
+      c.length
+        ? [
+            h("div", { class: "uitleg" }, vast ? "Uw correcties op het AI-voorstel:" : "U heeft het AI-voorstel aangepast. Bij goedkeuren wordt dit onthouden:"),
+            h("ul", { class: "correcties" }, c.map((x) => h("li", {}, x.tekst, x.soort === "oordeel" ? h("span", { class: "label leert" }, "leerpunt voor deze relatie") : h("span", { class: "label" }, "leesfout")))),
+          ]
+        : h("p", { class: "uitleg" }, "Past u de boeking aan, dan onthoudt het programma uw keuze van rekening en btw vanzelf voor deze relatie. Wilt u de AI iets uitleggen, schrijf het dan hieronder op."),
+      (doc.feedback ?? []).length ? [h("div", { class: "uitleg" }, "Opgeslagen feedback bij dit document:"), h("ul", { class: "correcties" }, doc.feedback.map((f) => h("li", {}, f.tekst, h("span", { class: "label" }, f.bereik === "relatie" ? "deze relatie" : "alle documenten"))))] : null,
+      feedbackTekst,
+      h("div", { class: "knoppen", style: "margin-top:8px" }, feedbackBereik, h("button", { class: "knop", onclick: stuurFeedback(false) }, "Feedback opslaan"), !vast && h("button", { class: "knop", onclick: stuurFeedback(true) }, "Opslaan en opnieuw uitlezen")),
     );
   }
 
@@ -326,15 +365,16 @@ async function paginaDocument(arg) {
     somCel.textContent = euro(b.regels.reduce((t, r) => t + r.bedragExcl + r.btwBedrag, 0));
   }
 
+  const relatieLabel = h("span", {}, b.soort === "inkoop" ? "Leverancier" : "Afnemer");
   const formulier = h(
     "div",
     { class: "kaart" },
     h(
       "div",
       { class: "rooster" },
-      veld("Soort", keuze([["inkoop", "Inkoop"], ["verkoop", "Verkoop"]], b.soort, (v) => ((b.soort = v), (b.relatieId = null), tekenRegels()))),
+      veld("Soort", keuze([["inkoop", "Inkoop"], ["verkoop", "Verkoop"]], b.soort, (v) => ((b.soort = v), (b.relatieId = null), (relatieLabel.textContent = v === "inkoop" ? "Leverancier" : "Afnemer"), tekenRegels()))),
       h("label", { class: "veld vink" }, h("input", { type: "checkbox", checked: b.creditnota, disabled: vast, onchange: (e) => ((b.creditnota = e.target.checked), gewijzigd()) }), h("span", {}, "Creditnota")),
-      veld(b.soort === "inkoop" ? "Leverancier" : "Afnemer", h("input", { value: b.relatieNaam, disabled: vast, oninput: (e) => ((b.relatieNaam = e.target.value), (b.relatieId = null), gewijzigd()) }), "breed"),
+      h("label", { class: "veld breed" }, relatieLabel, h("input", { value: b.relatieNaam, disabled: vast, oninput: (e) => ((b.relatieNaam = e.target.value), (b.relatieId = null), gewijzigd()) })),
       veld("Btw-nummer relatie", tekst("relatieBtwNummer")),
       veld("Land (ISO)", tekst("relatieLand")),
       veld("Factuurnummer", tekst("factuurnummer")),
@@ -397,12 +437,56 @@ async function paginaDocument(arg) {
   tekenUitkomst();
   vul(inhoud, 
     kop(`${b.relatieNaam || doc.bestandsnaam}`, doc.bestandsnaam, kopKnoppen),
-    h("div", { class: "splits" }, voorbeeld, h("div", {}, formulier, regelsKaart, h("div", { class: "kaart" }, signalenVak), h("div", { class: "kaart" }, journaalVak), acties)),
+    h("div", { class: "splits" }, voorbeeld, h("div", {}, formulier, regelsKaart, h("div", { class: "kaart" }, signalenVak), h("div", { class: "kaart" }, journaalVak), h("div", { class: "kaart" }, feedbackVak), acties)),
   );
 }
 
 const verwijderKnop = (id) =>
   h("button", { class: "knop gevaar", onclick: probeer(async () => (confirm("Dit document verwijderen?") && (await api(`/documenten/${id}`, "DELETE"), (location.hash = "#/documenten")))) }, "Verwijderen");
+
+// ---------- Feedback & kwaliteit ----------
+async function paginaFeedback() {
+  const { feedback, kwaliteit: k } = await api(`/administraties/${adminId}/feedback`);
+  const wijzig = probeer(async (f, velden) => {
+    Object.assign(f, velden);
+    await api(`/feedback/${f.id}`, "PUT", f);
+  });
+  const tegel = (groot, klein) => h("div", { class: "tegel" }, h("div", { class: "getal-groot" }, groot), h("div", { class: "zacht" }, klein));
+  const rijen = feedback.map((f) =>
+    h(
+      "tr",
+      {},
+      h("td", { style: "text-align:center" }, h("input", { type: "checkbox", checked: f.actief, title: "Meegeven aan de AI", onchange: (e) => wijzig(f, { actief: e.target.checked }) })),
+      h("td", {}, h("textarea", { rows: 2, style: "min-height:0;min-width:320px", onchange: (e) => wijzig(f, { tekst: e.target.value }) }, f.tekst)),
+      h("td", {}, f.bereik === "relatie" ? f.relatieNaam : h("i", {}, "alle documenten")),
+      h("td", {}, h("span", { class: `label ${f.bron === "handmatig" ? "leert" : ""}` }, f.bron === "handmatig" ? "door u geschreven" : "uit een correctie")),
+      h("td", {}, f.documentId ? h("a", { href: `#/document/${f.documentId}` }, `document ${f.documentId}`) : ""),
+      h("td", {}, h("button", { class: "knop klein gevaar", onclick: probeer(async () => (confirm("Deze feedback verwijderen?") && (await api(`/feedback/${f.id}`, "DELETE"), toon()))) }, "×")),
+    ),
+  );
+  vul(
+    inhoud,
+    kop("Feedback & kwaliteit", "Wat de AI van uw correcties en aanwijzingen heeft geleerd, en hoe goed de voorstellen zijn."),
+    h(
+      "div",
+      { class: "tegels", style: "margin-bottom:16px" },
+      tegel(k.percentage == null ? "–" : `${k.percentage}%`, "van de goedgekeurde boekingen zonder correctie"),
+      tegel(String(k.beoordeeld), "boekingen goedgekeurd"),
+      tegel(String(k.beoordeeld - k.zonderCorrectie), "daarvan door u aangepast"),
+      tegel(String(feedback.filter((f) => f.actief).length), "actieve leerpunten"),
+    ),
+    k.vaakGecorrigeerd.length
+      ? h("div", { class: "kaart" }, h("h2", {}, "Relaties waarbij u het vaakst corrigeert"), h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Relatie"), h("th", { class: "getal" }, "Gecorrigeerd"), h("th", { class: "getal" }, "Totaal"))), h("tbody", {}, k.vaakGecorrigeerd.map((r) => h("tr", {}, h("td", {}, r.naam), h("td", { class: "getal" }, r.gecorrigeerd), h("td", { class: "getal" }, r.totaal))))))
+      : null,
+    h(
+      "div",
+      { class: "kaart" },
+      h("h2", {}, "Leerpunten"),
+      h("p", { class: "uitleg" }, "Elk actief leerpunt gaat mee naar de AI bij het uitlezen van volgende documenten. Leerpunten ‘uit een correctie’ ontstaan vanzelf wanneer u bij het goedkeuren een andere rekening, btw-behandeling of indeling kiest dan de AI voorstelde. U kunt de tekst aanscherpen, een leerpunt uitzetten of verwijderen. Feedback geven doet u bij het document zelf."),
+      rijen.length ? h("div", { class: "tabelrol" }, h("table", {}, h("thead", {}, h("tr", {}, ["Actief", "Wat de AI moet weten", "Geldt voor", "Herkomst", "Bron", ""].map((t) => h("th", {}, t)))), h("tbody", {}, rijen))) : h("div", { class: "leeg" }, "Nog geen leerpunten."),
+    ),
+  );
+}
 
 // ---------- Export ----------
 async function paginaExport() {
