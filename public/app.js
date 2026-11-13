@@ -25,12 +25,22 @@ function vul(el, ...kinderen) {
   vulAan(el, kinderen);
 }
 
+let lopend = 0;
+let laderTimer;
+// De voortgangsbalk verschijnt alleen als een verzoek merkbaar lang duurt.
+const lader = (d) => {
+  lopend += d;
+  clearTimeout(laderTimer);
+  if (lopend > 0) laderTimer = setTimeout(() => $("#lader").classList.add("bezig"), 250);
+  else $("#lader").classList.remove("bezig");
+};
 async function api(pad, methode = "GET", body) {
+  lader(1);
   const r = await fetch("/api" + pad, {
     method: methode,
     headers: body instanceof FormData || body === undefined ? {} : { "content-type": "application/json" },
     body: body instanceof FormData ? body : body === undefined ? undefined : JSON.stringify(body),
-  });
+  }).finally(() => lader(-1));
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(data.fout || `Fout ${r.status}`), { data, status: r.status });
   return data;
@@ -88,7 +98,7 @@ $("#adminKeuze").addEventListener("change", async (e) => {
   adminId = Number(e.target.value);
   localStorage.setItem("adminId", adminId);
   await laadAdmin();
-  location.hash = "#/documenten";
+  location.hash = "#/start";
   toon();
 });
 $("#nieuweAdmin").addEventListener(
@@ -107,11 +117,29 @@ $("#nieuweAdmin").addEventListener(
 );
 
 // ---------- Routering ----------
-const paginas = { documenten: paginaDocumenten, document: paginaDocument, feedback: paginaFeedback, btw: paginaBtw, export: paginaExport, profiel: paginaProfiel, grootboek: paginaGrootboek, btwcodes: paginaBtwcodes, relaties: paginaRelaties };
+const paginas = { start: paginaStart, documenten: paginaDocumenten, document: paginaDocument, feedback: paginaFeedback, btw: paginaBtw, export: paginaExport, profiel: paginaProfiel, grootboek: paginaGrootboek, btwcodes: paginaBtwcodes, relaties: paginaRelaties };
 
+let vorigeRoute = "";
+/** Niet-opgeslagen wijzigingen op een instellingenpagina. */
+let onopgeslagen = false;
+let vasteHash = location.hash;
+async function werkTellerBij() {
+  if (!adminId) return;
+  const n = (await api(`/administraties/${adminId}/documenten`)).filter((d) => ["controle", "gereed", "fout"].includes(d.status)).length;
+  const t = $("#teller");
+  t.textContent = n;
+  t.hidden = n === 0;
+}
 async function toon() {
   clearTimeout(verversTimer);
-  const [, naam = "documenten", arg] = location.hash.split("/");
+  const [, naam = "start", arg] = location.hash.split("/");
+  if (location.hash !== vorigeRoute) {
+    vorigeRoute = location.hash;
+    inhoud.classList.add("wissel");
+    setTimeout(() => inhoud.classList.remove("wissel"), 250);
+    window.scrollTo(0, 0);
+  }
+  werkTellerBij().catch(() => {});
   document.querySelectorAll("#menu a").forEach((a) => a.classList.toggle("actief", a.getAttribute("href") === `#/${naam === "document" ? "documenten" : naam}`));
   if (!adminId) {
     vul(inhoud, 
@@ -120,19 +148,78 @@ async function toon() {
     return;
   }
   try {
-    await (paginas[naam] ?? paginaDocumenten)(arg);
+    await (paginas[naam] ?? paginaStart)(arg);
   } catch (e) {
     vul(inhoud, h("div", { class: "kaart leeg" }, e.message));
   }
 }
-window.addEventListener("hashchange", toon);
+window.addEventListener("hashchange", () => {
+  if (location.hash === vasteHash) return;
+  if (onopgeslagen && !confirm("U heeft wijzigingen die nog niet zijn opgeslagen. Toch de pagina verlaten?")) {
+    location.hash = vasteHash;
+    return;
+  }
+  onopgeslagen = false;
+  vasteHash = location.hash;
+  toon();
+});
+window.addEventListener("beforeunload", (e) => onopgeslagen && e.preventDefault());
+// Op de instellingenpagina's telt elke invoer als een niet-opgeslagen wijziging.
+inhoud.addEventListener("input", () => {
+  if (/^#\/(profiel|grootboek|btwcodes)/.test(location.hash)) onopgeslagen = true;
+});
 // Ctrl+Enter keurt het geopende document goed.
 window.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter") document.getElementById("goedkeurKnop")?.click();
 });
 
-const kop = (titel, uitleg, ...rechts) => h("div", { class: "paginakop" }, h("div", {}, h("h1", {}, titel), uitleg && h("div", { class: "zacht" }, uitleg)), h("div", { class: "knoppen" }, rechts));
+const kop = (titel, uitleg, ...rechts) => h("div", { class: "paginakop" }, h("div", {}, h("div", { class: "kicker" }, admin?.profiel.naam ?? ""), h("h1", {}, titel), uitleg && h("div", { class: "zacht" }, uitleg)), h("div", { class: "knoppen" }, rechts));
 const veld = (label, invoer, klasse = "") => h("label", { class: `veld ${klasse}` }, h("span", {}, label), invoer);
+
+// ---------- Start ----------
+async function paginaStart() {
+  await laadAdmin();
+  const [docs, fb] = await Promise.all([api(`/administraties/${adminId}/documenten`), api(`/administraties/${adminId}/feedback`)]);
+  const aantal = (...s) => docs.filter((d) => s.includes(d.status)).length;
+  const open = aantal("controle", "gereed", "fout");
+  const klaar = aantal("goedgekeurd");
+  const bezig = aantal("wachtrij", "bezig");
+  const p = admin.profiel;
+  const stappen = [
+    { klaar: Boolean(p.btwNummer && p.activiteiten), titel: "Bedrijfsprofiel invullen", uitleg: "Btw-nummer, activiteiten en boekingsinstructies: hieraan herkent de AI het bedrijf.", link: "#/profiel" },
+    { klaar: admin.grootboek.length > 0, titel: "Rekeningschema controleren", uitleg: `${admin.grootboek.length} grootboekrekeningen. Plak het schema uit Exact als het afwijkt.`, link: "#/grootboek" },
+    { klaar: Object.keys(admin.btwcodes).length > 0, titel: "Btw-codes van Exact koppelen", uitleg: "Nodig voor de export; zonder code gaat een boeking niet mee.", link: "#/btwcodes" },
+    { klaar: admin.relaties.some((r) => !r.nieuw), titel: "Relaties uit Exact overnemen", uitleg: "Optioneel: voorkomt dubbele relaties in Exact.", link: "#/relaties" },
+  ];
+  const volgende = bezig
+    ? { titel: `${bezig} document${bezig === 1 ? " wordt" : "en worden"} uitgelezen…`, uitleg: "Dit duurt meestal enkele seconden per document.", knop: "Naar documenten", link: "#/documenten" }
+    : open
+      ? { titel: `${open} document${open === 1 ? " wacht" : "en wachten"} op beoordeling`, uitleg: "Controleer het voorstel en keur goed. Ctrl+Enter gaat direct door naar het volgende.", knop: "Start met beoordelen", link: `#/document/${[...docs].reverse().find((d) => ["controle", "gereed", "fout"].includes(d.status)).id}` }
+      : klaar
+        ? { titel: `${klaar} boeking${klaar === 1 ? " staat" : "en staan"} klaar voor Exact`, uitleg: "Alles is beoordeeld. Exporteer de goedgekeurde boekingen.", knop: "Naar export", link: "#/export" }
+        : { titel: "Lever facturen en bonnen aan", uitleg: "PDF, foto of e-factuur. De AI maakt per document een boekingsvoorstel.", knop: "Documenten aanleveren", link: "#/documenten" };
+  const tegel = (groot, klein, link) => h("a", { class: "tegel", href: link }, h("div", { class: "getal-groot" }, groot), h("div", { class: "zacht" }, klein));
+  vul(
+    inhoud,
+    kop("Start", "Overzicht van deze administratie"),
+    h("div", { class: "kaart volgende" }, h("div", {}, h("h2", {}, volgende.titel), h("div", { class: "zacht" }, volgende.uitleg)), h("a", { class: "knop hoofd", href: volgende.link }, volgende.knop)),
+    h(
+      "div",
+      { class: "tegels", style: "margin-bottom:16px" },
+      tegel(String(open), "te beoordelen", "#/documenten"),
+      tegel(String(klaar), "goedgekeurd, klaar voor export", "#/export"),
+      tegel(String(aantal("geexporteerd")), "geëxporteerd naar Exact", "#/documenten"),
+      tegel(fb.kwaliteit.percentage == null ? "–" : `${fb.kwaliteit.percentage}%`, "in één keer goed", "#/feedback"),
+    ),
+    h(
+      "div",
+      { class: "kaart" },
+      h("h2", {}, "Inrichting van de administratie"),
+      h("ul", { class: "stappen" }, stappen.map((s, i) => h("li", { class: s.klaar ? "klaar" : "" }, h("span", { class: "bol" }, s.klaar ? "✓" : i + 1), h("span", {}, s.titel, h("small", {}, s.uitleg)), h("a", { class: "knop klein", href: s.link }, s.klaar ? "Bekijken" : "Invullen")))),
+    ),
+  );
+  if (bezig) verversTimer = setTimeout(toon, 2000);
+}
 
 // ---------- Documenten ----------
 let filter = "alle";
@@ -211,7 +298,7 @@ async function paginaDocumenten() {
         { class: "tabelrol" },
         h(
           "table",
-          {},
+          { class: "lijst" },
           h("thead", {}, h("tr", {}, ["Status", "Relatie", "Factuurnr.", "Datum", "Soort"].map((t) => h("th", {}, t)), h("th", { class: "getal" }, "Bedrag incl."), h("th", {}, "Signalen"), h("th", {}, "Bestand"))),
           h(
             "tbody",
@@ -227,7 +314,7 @@ async function paginaDocumenten() {
                 h("td", {}, d.soort ? `${d.soort}${d.creditnota ? " (credit)" : ""}` : ""),
                 h("td", { class: "getal" }, euro(d.totaalIncl)),
                 h("td", {}, [d.fouten ? `${d.fouten} fout${d.fouten > 1 ? "en" : ""}` : "", d.waarschuwingen ? `${d.waarschuwingen} let op` : ""].filter(Boolean).join(", ")),
-                h("td", { class: "zacht" }, d.bestandsnaam, d.efactuur ? h("span", { class: "label leert" }, "e-factuur") : null),
+                h("td", { class: "zacht", title: d.bestandsnaam }, d.efactuur ? h("span", { class: "label leert", style: "margin:0 6px 0 0" }, "e-factuur") : null, d.bestandsnaam),
               ),
             ),
           ),
@@ -235,7 +322,7 @@ async function paginaDocumenten() {
       )
     : h("div", { class: "leeg" }, docs.length ? "Geen documenten in deze weergave." : "Nog geen documenten. Lever hierboven de eerste factuur of bon aan.");
 
-  vul(inhoud, kop("Documenten", admin.profiel.naam), h("div", { class: "kaart" }, vak), h("div", { class: "kaart" }, balk, tabs, tabel));
+  vul(inhoud, kop("Documenten", "Aanleveren, laten uitlezen en beoordelen"), h("div", { class: "kaart" }, vak), h("div", { class: "kaart" }, balk, tabs, tabel));
   if (docs.some((d) => d.status === "wachtrij" || d.status === "bezig")) verversTimer = setTimeout(toon, 2000);
 }
 
@@ -251,15 +338,28 @@ async function paginaDocument(arg) {
   const vast = doc.status === "goedgekeurd" || doc.status === "geexporteerd";
   const b = doc.boeking;
   const bron = `/api/documenten/${id}/bestand`;
-  const voorbeeld = h("div", { class: "voorbeeld" }, doc.mime !== "application/pdf" && !/xml/.test(doc.mime) ? h("img", { src: bron, alt: "Document" }) : h("iframe", { src: bron, title: "Document", style: /xml/.test(doc.mime) ? "background:#fff" : "" }) );
+  const voorbeeld = h("div", { class: "voorbeeld", title: "Klik op de afbeelding om in of uit te zoomen", onclick: (e) => e.target.tagName === "IMG" && voorbeeld.classList.toggle("groot") }, doc.mime !== "application/pdf" && !/xml/.test(doc.mime) ? h("img", { src: bron, alt: "Document" }) : h("iframe", { src: bron, title: "Document", style: /xml/.test(doc.mime) ? "background:#fff" : "" }) );
 
   const signalenVak = h("div", {});
+  const eisenVak = h("div", {});
   const journaalVak = h("div", {});
   const feedbackVak = h("div", {});
   const statusVak = h("span", {});
   function tekenUitkomst() {
     vul(statusVak, chip(doc.status));
     tekenFeedback();
+    const fe = doc.factuureisen;
+    if (fe) {
+      const teken = { ja: "✓", nee: "✕", nvt: "–", onbekend: "?" };
+      const klasse = { voldoet: "leert", "voldoet niet": "slecht", "niet volledig beoordeeld": "letop" }[fe.oordeel];
+      vul(
+        eisenVak,
+        h("div", { class: "kopregel" }, h("h2", {}, "Factuurvereisten"), h("span", { class: `label ${klasse}` }, fe.oordeel[0].toUpperCase() + fe.oordeel.slice(1))),
+        h("p", { class: "uitleg" }, fe.soort === "vereenvoudigd" ? "Vereenvoudigde factuur (tot € 100 inclusief btw): er gelden minder eisen (art. 34d Wet OB)." : "Volledige factuur: de verplichte vermeldingen van art. 35a Wet OB."),
+        h("ul", { class: "eisen" }, fe.eisen.map((e) => h("li", { class: e.uitkomst }, h("span", { class: "teken" }, teken[e.uitkomst]), h("span", {}, e.omschrijving, e.toelichting ? h("small", {}, e.toelichting) : null)))),
+        fe.eisen.some((e) => e.uitkomst === "onbekend") ? h("p", { class: "uitleg", style: "margin:8px 0 0" }, "? = niet beoordeeld; lees het document opnieuw uit om ook deze punten te laten toetsen.") : null,
+      );
+    } else vul(eisenVak);
     const volgorde = { fout: 0, waarschuwing: 1, info: 2 };
     const titel = { fout: "Fout", waarschuwing: "Let op", info: "Info" };
     const s = [...doc.signaleringen].sort((x, y) => volgorde[x.niveau] - volgorde[y.niveau]);
@@ -337,7 +437,19 @@ async function paginaDocument(arg) {
     bewaarTimer = setTimeout(bewaarNu, 500);
   };
 
-  const kopKnoppen = [h("a", { class: "knop", href: "#/documenten" }, "← Terug"), statusVak];
+  // Vorige/volgende: binnen de documenten die nog beoordeeld moeten worden, of anders binnen alle documenten.
+  const alle = (await api(`/administraties/${adminId}/documenten`)).reverse();
+  const open = alle.filter((d) => ["controle", "gereed", "fout"].includes(d.status));
+  const reeks = open.some((d) => d.id === id) ? open : alle;
+  const plek = reeks.findIndex((d) => d.id === id);
+  const stap = (d, tekst) => h("a", { class: `knop klein ${d ? "" : "uit"}`, href: d ? `#/document/${d.id}` : null }, tekst);
+  const kopKnoppen = [
+    h("a", { class: "knop klein", href: "#/documenten" }, "Overzicht"),
+    stap(reeks[plek - 1], "← Vorige"),
+    h("span", { class: "zacht" }, `${plek + 1} van ${reeks.length}${reeks === open ? " te beoordelen" : ""}`),
+    stap(reeks[plek + 1], "Volgende →"),
+    statusVak,
+  ];
   if (!b) {
     tekenUitkomst();
     vul(inhoud, 
@@ -452,9 +564,11 @@ async function paginaDocument(arg) {
                 try {
                   await api(`/documenten/${id}/goedkeuren`, "POST");
                   await laadAdmin();
-                  const rest = (await api(`/administraties/${adminId}/documenten`)).filter((d) => ["controle", "gereed"].includes(d.status));
-                  meld("Goedgekeurd");
-                  location.hash = rest.length ? `#/document/${rest[rest.length - 1].id}` : "#/documenten";
+                  // Door naar het eerstvolgende document dat nog beoordeeld moet worden.
+                  const rest = (await api(`/administraties/${adminId}/documenten`)).filter((d) => ["controle", "gereed"].includes(d.status)).reverse();
+                  const volgend = rest.find((d) => d.id > id) ?? rest[0];
+                  meld(volgend ? "Goedgekeurd — door naar het volgende document" : "Goedgekeurd — alles is beoordeeld");
+                  location.hash = volgend ? `#/document/${volgend.id}` : "#/documenten";
                 } catch (e) {
                   if (e.data?.document) ((doc = e.data.document), tekenUitkomst());
                   meld(e.message, true);
@@ -472,7 +586,7 @@ async function paginaDocument(arg) {
   tekenUitkomst();
   vul(inhoud, 
     kop(`${b.relatieNaam || doc.bestandsnaam}`, doc.bestandsnaam, kopKnoppen),
-    h("div", { class: "splits" }, voorbeeld, h("div", {}, formulier, regelsKaart, h("div", { class: "kaart" }, signalenVak), h("div", { class: "kaart" }, journaalVak), h("div", { class: "kaart" }, feedbackVak), acties)),
+    h("div", { class: "splits" }, voorbeeld, h("div", {}, formulier, regelsKaart, h("div", { class: "kaart" }, signalenVak), doc.factuureisen ? h("div", { class: "kaart" }, eisenVak) : null, h("div", { class: "kaart" }, journaalVak), h("div", { class: "kaart" }, feedbackVak), acties)),
   );
 }
 
@@ -607,7 +721,7 @@ async function paginaExport() {
     });
 
   vul(inhoud, 
-    kop("Export naar Exact", admin.profiel.naam),
+    kop("Export naar Exact", "Goedgekeurde boekingen klaarzetten voor import in Exact Online"),
     h(
       "div",
       { class: "kaart" },
@@ -655,6 +769,7 @@ async function paginaProfiel() {
     await api(`/administraties/${adminId}/profiel`, "PUT", p);
     await laadAdmins();
     await laadAdmin();
+    onopgeslagen = false;
     meld("Bedrijfsprofiel opgeslagen");
   });
 
@@ -698,6 +813,7 @@ async function paginaGrootboek() {
     const res = await api(`/administraties/${adminId}/grootboek`, "PUT", lijst);
     await laadAdmin();
     gebied.value = res.map((g) => `${g.code};${g.omschrijving}`).join("\n");
+    onopgeslagen = false;
     meld(`${res.length} rekeningen opgeslagen`);
   });
   vul(inhoud, 
@@ -714,6 +830,7 @@ async function paginaBtwcodes() {
   const bewaar = probeer(async () => {
     await api(`/administraties/${adminId}/btwcodes`, "PUT", codes);
     await laadAdmin();
+    onopgeslagen = false;
     meld("Btw-codes opgeslagen");
   });
   vul(inhoud, 
@@ -794,7 +911,8 @@ async function paginaRelaties() {
     $("#model").textContent = `AI-model: ${meta.model}`;
     await laadAdmins();
     await laadAdmin();
-    if (!location.hash) location.hash = "#/documenten";
+    if (!location.hash) location.hash = "#/start";
+    vasteHash = location.hash;
     toon();
   } catch (e) {
     vul(inhoud, h("div", { class: "kaart leeg" }, `Kan de server niet bereiken: ${e.message}`));

@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BEHANDELINGEN, behandeling, isBehandeling, normaliseerBtwNummer } from "./btw.ts";
 import { btwOverzicht } from "./aangifte.ts";
+import { beoordeelFactuur } from "./factuureisen.ts";
 import { isGeldigeDatum, maakBoeking, maakJournaalpost, verschillen, zelfdeNaam, zoekRelatie } from "./boeking.ts";
 import { isXml, leesUbl } from "./ubl.ts";
 import { NietGevonden, Opslag } from "./db.ts";
@@ -116,6 +117,7 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
       journaalpost: d.boeking ? maakJournaalpost(d.boeking, profiel) : [],
       correcties: d.boeking && d.aiVoorstel ? verschillen(d.aiVoorstel, d.boeking, opslag.grootboek(d.adminId)) : [],
       feedback: opslag.feedback(d.adminId).filter((f) => f.documentId === d.id),
+      factuureisen: d.boeking && d.extractie ? beoordeelFactuur(d.extractie, d.boeking) : null,
       exactRegels: d.boeking ? exactRegels(d.boeking, profiel, opslag.btwcodes(d.adminId)) : [],
     };
   };

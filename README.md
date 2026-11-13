@@ -51,6 +51,21 @@ Open daarna http://localhost:3000.
 3. **Btw-codes**: vul per btw-behandeling de btw-code uit Exact in (Stamgegevens → Btw-codes). Zonder code wordt een boeking niet geëxporteerd.
 4. **Relaties**: plak de bestaande relaties uit Exact als `code;naam;btw-nummer;soort`, zodat er geen dubbele relaties ontstaan. Nieuwe relaties krijgen een code vanaf het startnummer in het profiel en gaan eenmalig mee in de XML-export.
 
+## Factuurvereisten
+
+Bij elk document staat een paneel **Factuurvereisten** dat per wettelijk verplichte vermelding laat zien of die op de factuur staat (art. 35a Wet OB):
+
+- datum van uitreiking en opeenvolgend factuurnummer;
+- btw-identificatienummer van de leverancier, en van de afnemer bij verlegging of intracommunautaire prestaties;
+- naam en adres van leverancier en afnemer;
+- hoeveelheid en aard van de goederen of diensten, en de datum van levering als die afwijkt;
+- maatstaf van heffing per tarief, eenheidsprijs exclusief btw, tarief en btw-bedrag;
+- de vermelding bij verlegging of vrijstelling.
+
+Tot € 100 inclusief btw gelden de lichtere eisen van de vereenvoudigde factuur (art. 34d Wet OB), behalve bij verlegging. Het oordeel is "voldoet", "voldoet niet" of "niet volledig beoordeeld". Ontbreekt er iets op een inkoopfactuur waarvan btw wordt afgetrokken, dan volgt een waarschuwing dat de aftrek bij een controle kan worden geweigerd; de boeking kan wel worden goedgekeurd, dat blijft uw afweging. Dezelfde toets werkt voor de eigen verkoopfacturen.
+
+Of een vermelding op het document staat, stelt de AI vast; de toets zelf is een vaste regel. Documenten die vóór deze versie zijn uitgelezen tonen "niet volledig beoordeeld" tot ze opnieuw worden uitgelezen.
+
 ## Feedback en kwaliteit
 
 - **Automatisch**: kiest u bij het goedkeuren een andere rekening, btw-behandeling of indeling dan de AI voorstelde, dan wordt dat vastgelegd als leerpunt voor die relatie.
@@ -64,6 +79,9 @@ Naast PDF's en foto's kunt u e-facturen in XML aanleveren (UBL 2.1, zoals SI-UBL
 
 ## Sneller werken
 
+- **Startpagina** met de volgende stap, de aantallen per status en een controlelijst voor de inrichting.
+- **Vorige/volgende** bij een document, met de teller "2 van 5 te beoordelen"; na goedkeuren opent het eerstvolgende document.
+- Klik op een foto om in of uit te zoomen. Instellingenpagina's waarschuwen bij niet-opgeslagen wijzigingen.
 - **Zoeken** in de documentenlijst op relatie, factuurnummer, bedrag of bestandsnaam.
 - **In één keer goedkeuren** van alle documenten zonder fout of waarschuwing; de rest blijft staan voor beoordeling.
 - **Ctrl+Enter** keurt het geopende document goed en opent het volgende.
@@ -72,7 +90,7 @@ Naast PDF's en foto's kunt u e-facturen in XML aanleveren (UBL 2.1, zoals SI-UBL
 
 ## Voorbeelddocumenten
 
-In de map `voorbeelden/` staan zes oefendocumenten, waaronder een e-factuur. In de demomodus worden ze aan hun bestandsnaam herkend; de tankbonnen laten zien hoe feedback werkt.
+In de map `voorbeelden/` staan zeven oefendocumenten, waaronder een e-factuur en een factuur die niet aan de factuurvereisten voldoet. In de demomodus worden ze aan hun bestandsnaam herkend; de tankbonnen laten zien hoe feedback werkt.
 
 ## Btw-controles
 
@@ -112,6 +130,10 @@ Geen enkele AI leest elk document gegarandeerd foutloos. Het programma is daarom
 - **CSV**: één rij per boekingsregel, voor een eigen importdefinitie.
 - Doe eerst een **proefimport** met één of twee boekingen. Het XML-formaat is opgezet volgens de Exact Online-structuur maar nog niet tegen een echte Exact-omgeving getest.
 - **Directe koppeling (later)**: de export staat los in `src/exact.ts`. Een koppeling met de Exact Online REST-API (OAuth, boekingen en bijlagen direct inschieten, rekeningschema en relaties ophalen) kan daar naast worden gezet zonder de rest te wijzigen.
+
+## Huisstijl
+
+De interface volgt de huisstijl van Beuk Accountants & Belastingadviseurs (kleuren en logo in `public/style.css` en `public/img/`).
 
 ## Privacy en beveiliging
 

@@ -3,19 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Scan &amp; Herken</title>
+  <title>Scan &amp; Herken · Beuk Accountants &amp; Belastingadviseurs</title>
+  <link rel="icon" type="image/png" href="img/beuk-icoon.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <aside id="zijbalk">
-    <div class="merk">Scan &amp; Herken</div>
+    <a class="merk" href="#/start"><img src="img/beuk-wit.png" alt="Beuk Accountants &amp; Belastingadviseurs"><span>Scan &amp; Herken</span></a>
     <label class="veld">
       <span>Administratie</span>
       <select id="adminKeuze"></select>
     </label>
     <button id="nieuweAdmin" class="knop klein">+ Nieuwe administratie</button>
     <nav id="menu">
-      <a href="#/documenten">Documenten</a>
+      <a href="#/start">Start</a>
+      <a href="#/documenten">Documenten <span class="teller" id="teller" hidden></span></a>
       <a href="#/feedback">Feedback &amp; kwaliteit</a>
       <a href="#/btw">Btw-overzicht</a>
       <a href="#/export">Export naar Exact</a>
@@ -28,6 +30,7 @@
     <div id="model" class="voet"></div>
   </aside>
   <main id="inhoud"></main>
+  <div id="lader"></div>
   <div id="melding" hidden></div>
   <script type="module" src="app.js"></script>
 </body>

@@ -53,6 +53,19 @@ export const ExtractieSchema = z.object({
   zekerheid: z.enum(["hoog", "middel", "laag"]),
   onzekerheden: z.array(z.string()).describe("Concrete twijfelpunten die een mens moet controleren; leeg als er geen zijn"),
   vermeldingen: z.array(z.string()).describe("Letterlijke btw-vermeldingen op het document, bv. 'btw verlegd', 'margeregeling', 'vrijgesteld van btw'; leeg als er geen zijn"),
+  factuurkenmerken: z
+    .object({
+      adresAfzenderVermeld: z.boolean().describe("Het volledige adres van de afzender staat op het document"),
+      adresAfnemerVermeld: z.boolean().describe("Naam én volledig adres van de afnemer staan op het document"),
+      btwNummerAfnemerVermeld: z.boolean().describe("Het btw-identificatienummer van de afnemer staat op het document"),
+      aardEnHoeveelheidVermeld: z.boolean().describe("Per regel is duidelijk wat er is geleverd (aard) en hoeveel (aantal, uren, periode of omvang)"),
+      leverdatumVermeld: z.boolean().describe("Een datum of periode van levering of dienst staat apart vermeld"),
+      grondslagPerTariefVermeld: z.boolean().describe("Het bedrag exclusief btw staat per tarief of per regel vermeld"),
+      eenheidsprijsVermeld: z.boolean().describe("De prijs per eenheid exclusief btw staat vermeld"),
+      tariefVermeld: z.boolean().describe("Het toegepaste btw-percentage staat vermeld"),
+      btwBedragVermeld: z.boolean().describe("Het btw-bedrag staat vermeld"),
+    })
+    .describe("Welke wettelijk verplichte vermeldingen feitelijk op het document staan. Beoordeel wat er staat, niet wat er had moeten staan."),
 });
 
 const SYSTEEM = `Je verwerkt inkoop- en verkoopdocumenten (facturen, creditnota's en kassabonnen) voor een Nederlandse boekhouding. Jouw uitkomst wordt een boekingsvoorstel dat een boekhouder controleert en daarna in Exact Online importeert. Een fout in een bedrag, datum of btw-behandeling komt dus in de btw-aangifte terecht; nauwkeurigheid gaat boven volledigheid.
@@ -91,6 +104,9 @@ Kies per regel de best passende code uit het rekeningschema van de administratie
 
 ## Feedback van de boekhouder
 Je kunt feedback krijgen op eerder verwerkte documenten: correcties die de boekhouder op een voorstel heeft aangebracht en aanwijzingen die hij heeft opgeschreven. Dat is de belangrijkste bron om van te leren hoe deze administratie boekt. Pas feedback toe op elk document waarvoor zij redelijkerwijs geldt: feedback bij een relatie op documenten van die relatie, algemene feedback op alle vergelijkbare situaties. Feedback gaat voor op je eigen inschatting, maar verandert niets aan wat er feitelijk op het document staat. Staat er geen passende rekening in het schema, laat de code dan leeg; verzin geen codes.
+
+## Factuurvereisten
+Bij factuurkenmerken geef je aan welke verplichte vermeldingen feitelijk op het document staan. Het programma toetst daarmee of de factuur aan art. 35a Wet OB voldoet. Wees hier streng en letterlijk: een vermelding die ontbreekt of onleesbaar is, is niet vermeld. Vul een ontbrekend btw-nummer of adres nooit aan uit het profiel of uit eerdere documenten.
 
 ## Onzekerheden
 Noem alleen punten die een boekhouder echt moet nakijken: een slecht leesbaar bedrag, een totaal dat niet aansluit op de regels van het document, een ontbrekend btw-nummer bij verlegging, twijfel tussen twee rekeningen of btw-behandelingen. Schrijf ze in het Nederlands, kort en concreet. Zet zekerheid op "laag" als je kernvelden (totaal, btw, datum, leverancier) niet betrouwbaar kon lezen.`;
@@ -244,7 +260,9 @@ export const demoExtractor: Extractor = async ({ bestandsnaam, profiel, relaties
     onzekerheden: [],
     vermeldingen: [],
     vervaldatum: null,
+    factuurkenmerken: { adresAfzenderVermeld: true, adresAfnemerVermeld: true, btwNummerAfnemerVermeld: true, aardEnHoeveelheidVermeld: true, leverdatumVermeld: false, grondslagPerTariefVermeld: true, eenheidsprijsVermeld: true, tariefVermeld: true, btwBedragVermeld: true },
   };
+  const bon = { ...basis.factuurkenmerken, adresAfnemerVermeld: false, btwNummerAfnemerVermeld: false };
   // Net als de echte AI houdt het voorbeeld rekening met wat over de relatie is geleerd.
   const geleerd = (naam: string, standaard: string) => {
     const tekst = [aanwijzing, ...feedback.filter((f) => f.actief && (f.bereik === "administratie" || naam.startsWith(f.relatieNaam.split(" ")[0] ?? "~"))).map((f) => f.tekst)].join(" ");
@@ -271,6 +289,7 @@ export const demoExtractor: Extractor = async ({ bestandsnaam, profiel, relaties
     },
     lepel: {
       ...basis,
+      factuurkenmerken: bon,
       documentType: "bon",
       afzender: { ...leeg, naam: "Restaurant De Gouden Lepel", btwNummer: "NL001234567B02" },
       afnemer: { ...leeg, naam: "" },
@@ -315,8 +334,23 @@ export const demoExtractor: Extractor = async ({ bestandsnaam, profiel, relaties
       betalingskenmerk: "2026-1187",
       omschrijving: "Meel en transport",
     },
+    klusbedrijf: {
+      ...basis,
+      documentType: "inkoopfactuur",
+      afzender: { ...leeg, naam: "Klusbedrijf Bakker", adres: "Achterweg 7, 3451 CD Vleuten", iban: "NL91ABNA0417164300" },
+      afnemer: { ...leeg, naam: profiel.naam },
+      factuurnummer: "17",
+      factuurdatum: "2026-11-09",
+      regels: [{ omschrijving: "Herstel plafond winkel", bedragExcl: 400, btwPercentage: 21, btwBedrag: 84, btwBehandeling: "NL_HOOG", categorie: "overig", grootboekCode: "4120" }],
+      totaalExcl: 400,
+      totaalBtw: 84,
+      totaalIncl: 484,
+      omschrijving: "Herstel plafond",
+      factuurkenmerken: { ...basis.factuurkenmerken, adresAfnemerVermeld: false, btwNummerAfnemerVermeld: false, eenheidsprijsVermeld: false },
+    },
     shell: {
       ...basis,
+      factuurkenmerken: bon,
       documentType: "bon",
       afzender: { ...leeg, naam: "Shell Station De Meern", btwNummer: "NL004455667B01" },
       afnemer: { ...leeg, naam: "" },

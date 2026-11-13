@@ -11,13 +11,12 @@ import {
   normaliseerBtwNummer,
 } from "./btw.ts";
 import { isGeldigeDatum, maakJournaalpost, zelfdeNaam } from "./boeking.ts";
+import { beoordeelFactuur } from "./factuureisen.ts";
 import type { Boeking, Extractie, Grootboekrekening, Profiel, Signalering } from "./types.ts";
 import type { UblKern } from "./ubl.ts";
 
 const euro = (c: number) => (c / 100).toLocaleString("nl-NL", { style: "currency", currency: "EUR" });
 
-/** Grens voor de vereenvoudigde factuur (art. 34d Wet OB): € 100 inclusief btw. */
-const GRENS_VEREENVOUDIGD = 100_00;
 
 export interface ControleContext {
   /** Er bestaat al een ander document met dezelfde relatie en hetzelfde factuurnummer. */
@@ -177,20 +176,17 @@ export function valideer(
     }
   });
 
-  // --- Factuurvereisten voor aftrek (art. 35a Wet OB) ---
+  // --- Factuurvereisten (art. 35a Wet OB) ---
   const aftrekGevraagd = inkoop && b.regels.some((r) => behandeling(r.btw).aftrekbaar);
-  if (aftrekGevraagd) {
-    const vereenvoudigd = Math.abs(b.totaalIncl) <= GRENS_VEREENVOUDIGD;
-    const ontbreekt: string[] = [];
-    if (!b.factuurnummer.trim() && !vereenvoudigd) ontbreekt.push("factuurnummer");
-    if (!btwNr && !vereenvoudigd) ontbreekt.push("btw-identificatienummer van de leverancier");
-    if (ex && !vereenvoudigd && !ex.afnemer.naam.trim()) ontbreekt.push("naam en adres van de afnemer");
-    if (ontbreekt.length) {
-      let_op("FACTUUREISEN", `Voor aftrek van voorbelasting ontbreekt op de factuur: ${ontbreekt.join(", ")} (art. 35a Wet OB).`);
-    }
-    if (ex && !vereenvoudigd && ex.afnemer.naam.trim() && ![profiel.naam, ...profiel.handelsnamen].some((n) => zelfdeNaam(n, ex.afnemer.naam))) {
-      let_op("TENAAMSTELLING", `De factuur staat op naam van "${ex.afnemer.naam}", niet van ${profiel.naam}. Zonder juiste tenaamstelling is er geen recht op aftrek.`);
-    }
+  const beoordeling = ex ? beoordeelFactuur(ex, b) : null;
+  if (beoordeling?.ontbreekt.length) {
+    const lijst = beoordeling.ontbreekt.join("; ");
+    if (!inkoop) let_op("FACTUUREISEN", `De eigen factuur voldoet niet aan de factuurvereisten (art. 35a Wet OB). Ontbreekt: ${lijst}.`);
+    else if (aftrekGevraagd) let_op("FACTUUREISEN", `De factuur voldoet niet aan de factuurvereisten (art. 35a Wet OB). Ontbreekt: ${lijst}. De aftrek van voorbelasting kan bij een controle worden geweigerd; vraag een juiste factuur op.`);
+    else info("FACTUUREISEN", `De factuur voldoet niet aan de factuurvereisten (art. 35a Wet OB). Ontbreekt: ${lijst}. Er wordt geen btw afgetrokken.`);
+  }
+  if (aftrekGevraagd && ex && beoordeling?.soort === "volledig" && ex.afnemer.naam.trim() && ![profiel.naam, ...profiel.handelsnamen].some((n) => zelfdeNaam(n, ex.afnemer.naam))) {
+    let_op("TENAAMSTELLING", `De factuur staat op naam van "${ex.afnemer.naam}", niet van ${profiel.naam}. Zonder juiste tenaamstelling is er geen recht op aftrek.`);
   }
   if (btwNr.startsWith("NL") && !isGeldigNlBtwNummer(btwNr)) {
     let_op("BTW_NUMMER", `Btw-nummer ${btwNr} heeft geen geldig Nederlands formaat (NL + 9 cijfers + B + 2 cijfers); mogelijk verkeerd gelezen.`);

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { isGeldigeDatum, maakBoeking, maakJournaalpost, verschillen, zelfdeNaam } from "../src/boeking.ts";
 import { isGeldigeIban, isGeldigNlBtwNummer, centen } from "../src/btw.ts";
 import { STANDAARD_GROOTBOEK, standaardProfiel } from "../src/defaults.ts";
+import { beoordeelFactuur } from "../src/factuureisen.ts";
 import { controleerExport, exactCsv, exactRegels, exactXml } from "../src/exact.ts";
 import { heeftFouten, valideer } from "../src/validatie.ts";
 import type { Boeking, Document, Extractie, ExtractieRegel, Profiel, Relatie } from "../src/types.ts";
@@ -208,4 +209,45 @@ test("correcties: onderscheid tussen oordeel en leesfout", () => {
   assert.deepEqual(v.map((x) => x.soort).sort(), ["lezing", "oordeel"]);
   assert.match(v.find((x) => x.soort === "oordeel")!.tekst, /4590 \(Overige algemene kosten\).*4300 \(Brandstof\)/);
   assert.deepEqual(verschillen(ai, ai, STANDAARD_GROOTBOEK), []);
+});
+
+const kenmerken = { adresAfzenderVermeld: true, adresAfnemerVermeld: true, btwNummerAfnemerVermeld: false, aardEnHoeveelheidVermeld: true, leverdatumVermeld: false, grondslagPerTariefVermeld: true, eenheidsprijsVermeld: true, tariefVermeld: true, btwBedragVermeld: true };
+
+test("factuurvereisten: volledige factuur die voldoet", () => {
+  const ex = extractie([{}], { factuurkenmerken: kenmerken });
+  const f = beoordeelFactuur(ex, boek(ex).boeking);
+  assert.equal(f.soort, "volledig");
+  assert.equal(f.oordeel, "voldoet");
+  assert.equal(f.eisen.find((e) => e.code === "btwAfnemer")!.uitkomst, "nvt");
+  assert.equal(f.eisen.find((e) => e.code === "leverdatum")!.uitkomst, "nvt");
+});
+
+test("factuurvereisten: ontbrekend btw-nummer en adres geeft een waarschuwing over de aftrek", () => {
+  const ex = extractie([{}], { afzender: { ...leeg, naam: "Klusbedrijf Bakker" }, factuurkenmerken: { ...kenmerken, adresAfnemerVermeld: false } });
+  const { boeking } = boek(ex);
+  const f = beoordeelFactuur(ex, boeking);
+  assert.equal(f.oordeel, "voldoet niet");
+  assert.deepEqual(f.eisen.filter((e) => e.uitkomst === "nee").map((e) => e.code), ["btwLeverancier", "adresAfnemer"]);
+  const s = valideer(boeking, ex, profiel, STANDAARD_GROOTBOEK, ctx).find((x) => x.code === "FACTUUREISEN")!;
+  assert.equal(s.niveau, "waarschuwing");
+  assert.match(s.tekst, /aftrek van voorbelasting/);
+});
+
+test("factuurvereisten: vereenvoudigde factuur tot € 100 en verlegging", () => {
+  const bon = extractie([{ bedragExcl: 60, btwBedrag: 12.6 }], { documentType: "bon", afnemer: { ...leeg, naam: "" }, afzender: { ...leeg, naam: "Shell" }, factuurnummer: null, factuurkenmerken: { ...kenmerken, adresAfnemerVermeld: false } });
+  const f = beoordeelFactuur(bon, boek(bon).boeking);
+  assert.equal(f.soort, "vereenvoudigd");
+  assert.equal(f.oordeel, "voldoet");
+
+  // Bij verlegging geldt de vereenvoudigde factuur niet en zijn het btw-nummer van de afnemer en de vermelding verplicht.
+  const eu = extractie([{ bedragExcl: 50, btwBedrag: 0, btwBehandeling: "EU_DIENSTEN" }], { afzender: { ...leeg, naam: "X Ltd", landcode: "IE", btwNummer: "IE3668997OH" }, factuurkenmerken: kenmerken });
+  const g = beoordeelFactuur(eu, boek(eu).boeking);
+  assert.equal(g.soort, "volledig");
+  assert.deepEqual(g.eisen.filter((e) => e.uitkomst === "nee").map((e) => e.code), ["btwAfnemer", "vermelding"]);
+  assert.equal(g.eisen.find((e) => e.code === "btwBedrag")!.uitkomst, "nvt");
+});
+
+test("factuurvereisten: zonder kenmerken (ouder document) niet volledig beoordeeld, geen valse afkeuring", () => {
+  const ex = extractie([{}]);
+  assert.equal(beoordeelFactuur(ex, boek(ex).boeking).oordeel, "niet volledig beoordeeld");
 });

@@ -113,6 +113,18 @@ export interface Extractie {
   omschrijving: string;
   zekerheid: "hoog" | "middel" | "laag";
   onzekerheden: string[];
+  /** Welke wettelijk verplichte vermeldingen op het document staan (art. 35a Wet OB). */
+  factuurkenmerken?: {
+    adresAfzenderVermeld: boolean;
+    adresAfnemerVermeld: boolean;
+    btwNummerAfnemerVermeld: boolean;
+    aardEnHoeveelheidVermeld: boolean;
+    leverdatumVermeld: boolean;
+    grondslagPerTariefVermeld: boolean;
+    eenheidsprijsVermeld: boolean;
+    tariefVermeld: boolean;
+    btwBedragVermeld: boolean;
+  };
   /** Letterlijke btw-vermeldingen op het document, bv. "margeregeling" of "btw verlegd". */
   vermeldingen?: string[];
 }
