@@ -31,6 +31,7 @@ export class Opslag {
     const kolommen = new Set(this.db.prepare("PRAGMA table_info(documenten)").all().map((k) => String(k.name)));
     if (!kolommen.has("ai_voorstel")) this.db.exec("ALTER TABLE documenten ADD COLUMN ai_voorstel TEXT");
     if (!kolommen.has("aanwijzing")) this.db.exec("ALTER TABLE documenten ADD COLUMN aanwijzing TEXT NOT NULL DEFAULT ''");
+    if (!kolommen.has("goedgekeurd_op")) this.db.exec("ALTER TABLE documenten ADD COLUMN goedgekeurd_op TEXT NOT NULL DEFAULT ''");
     if (!kolommen.has("gecorrigeerd")) this.db.exec("ALTER TABLE documenten ADD COLUMN gecorrigeerd INTEGER");
     // Na een herstart staan onderbroken documenten weer in de wachtrij.
     this.db.exec("UPDATE documenten SET status = 'wachtrij' WHERE status = 'bezig'");
@@ -123,6 +124,7 @@ export class Opslag {
       geexporteerdOp: String(r.geexporteerd_op),
       aiVoorstel: r.ai_voorstel ? (JSON.parse(String(r.ai_voorstel)) as Boeking) : null,
       aanwijzing: String(r.aanwijzing ?? ""),
+      goedgekeurdOp: String(r.goedgekeurd_op ?? ""),
       gecorrigeerd: r.gecorrigeerd == null ? null : Boolean(r.gecorrigeerd),
     };
   }
@@ -140,8 +142,8 @@ export class Opslag {
       .run(adminId, bestandsnaam, mime, pad, hash, new Date().toISOString());
     return Number(r.lastInsertRowid);
   }
-  werkDocumentBij(id: number, velden: Partial<Pick<Document, "status" | "extractie" | "boeking" | "signaleringen" | "fout" | "geexporteerdOp" | "aiVoorstel" | "aanwijzing" | "gecorrigeerd">>) {
-    const kolommen: Record<string, string> = { geexporteerdOp: "geexporteerd_op", aiVoorstel: "ai_voorstel" };
+  werkDocumentBij(id: number, velden: Partial<Pick<Document, "status" | "extractie" | "boeking" | "signaleringen" | "fout" | "geexporteerdOp" | "aiVoorstel" | "aanwijzing" | "gecorrigeerd" | "goedgekeurdOp">>) {
+    const kolommen: Record<string, string> = { geexporteerdOp: "geexporteerd_op", aiVoorstel: "ai_voorstel", goedgekeurdOp: "goedgekeurd_op" };
     for (const [k, v] of Object.entries(velden)) {
       const waarde = v !== null && typeof v === "object" ? JSON.stringify(v) : typeof v === "boolean" ? Number(v) : (v as string | null);
       this.db.prepare(`UPDATE documenten SET ${kolommen[k] ?? k} = ? WHERE id = ?`).run(waarde, id);

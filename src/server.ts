@@ -5,7 +5,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BEHANDELINGEN, behandeling, isBehandeling, normaliseerBtwNummer } from "./btw.ts";
-import { maakBoeking, maakJournaalpost, verschillen, zelfdeNaam, zoekRelatie } from "./boeking.ts";
+import { btwOverzicht } from "./aangifte.ts";
+import { isGeldigeDatum, maakBoeking, maakJournaalpost, verschillen, zelfdeNaam, zoekRelatie } from "./boeking.ts";
+import { isXml, leesUbl } from "./ubl.ts";
 import { NietGevonden, Opslag } from "./db.ts";
 import { btwSleutel, controleerExport, exactCsv, exactRegels, exactXml, journaalCsv } from "./exact.ts";
 import { MODEL, ONDERSTEUNDE_TYPES, demoExtractor, extraheerMetClaude, vertaalApiFout, type Extractor } from "./extract.ts";
@@ -20,8 +22,18 @@ function vandaag(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
+export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wachtwoord = "") {
   const app = express();
+  // Met SCAN_WACHTWOORD ingesteld vraagt de browser om een wachtwoord (gebruikersnaam is vrij).
+  if (wachtwoord) {
+    const verwacht = crypto.createHash("sha256").update(wachtwoord).digest();
+    app.use((req, res, next) => {
+      const [soort, code] = (req.headers.authorization ?? "").split(" ");
+      const gegeven = soort === "Basic" && code ? Buffer.from(code, "base64").toString("utf8").split(":").slice(1).join(":") : "";
+      if (crypto.timingSafeEqual(crypto.createHash("sha256").update(gegeven).digest(), verwacht)) return next();
+      res.setHeader("WWW-Authenticate", 'Basic realm="Scan & Herken", charset="UTF-8"').status(401).send("Wachtwoord vereist");
+    });
+  }
   app.use(express.json({ limit: "2mb" }));
   app.use(express.static(path.join(hier, "..", "public")));
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024, files: 50 } });
@@ -45,7 +57,11 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
   }
 
   function controleer(doc: Document, b: Boeking, extra: Signalering[] = []): Signalering[] {
-    const s = valideer(b, doc.extractie, opslag.profiel(doc.adminId), opslag.grootboek(doc.adminId), { dubbel: isDubbel(doc, b), vandaag: vandaag() });
+    const s = valideer(b, doc.extractie, opslag.profiel(doc.adminId), opslag.grootboek(doc.adminId), {
+      dubbel: isDubbel(doc, b),
+      vandaag: vandaag(),
+      ubl: isXml(doc.mime) ? leesUbl(fs.readFileSync(doc.pad, "utf8")) : null,
+    });
     return [...s, ...extra];
   }
 
@@ -70,6 +86,15 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
             grootboek: opslag.grootboek(doc.adminId),
             relaties: opslag.relaties(doc.adminId),
           });
+          // Bij een e-factuur zijn nummer, datum en soort uit het bestand zelf leidend.
+          const ubl = isXml(doc.mime) ? leesUbl(fs.readFileSync(doc.pad, "utf8")) : null;
+          if (ubl) {
+            extractie.factuurnummer = ubl.factuurnummer;
+            if (ubl.datum) extractie.factuurdatum = ubl.datum;
+            extractie.valuta = ubl.valuta;
+            const verkoop = extractie.documentType === "verkoopfactuur" || extractie.documentType === "creditnota_verkoop";
+            extractie.documentType = ubl.creditnota ? (verkoop ? "creditnota_verkoop" : "creditnota_inkoop") : verkoop ? "verkoopfactuur" : "inkoopfactuur";
+          }
           const { boeking, meldingen } = maakBoeking(extractie, opslag.profiel(doc.adminId), opslag.relaties(doc.adminId), opslag.grootboek(doc.adminId));
           const signaleringen = controleer({ ...doc, extractie }, boeking, meldingen);
           opslag.werkDocumentBij(doc.id, { extractie, boeking, aiVoorstel: boeking, gecorrigeerd: null, signaleringen, status: statusNaControle(signaleringen) });
@@ -209,6 +234,7 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
         factuurnummer: d.boeking?.factuurnummer ?? "",
         datum: d.boeking?.datum ?? "",
         totaalIncl: d.boeking?.totaalIncl ?? null,
+        efactuur: isXml(d.mime),
         fouten: d.signaleringen.filter((s) => s.niveau === "fout").length,
         waarschuwingen: d.signaleringen.filter((s) => s.niveau === "waarschuwing").length,
       })),
@@ -223,7 +249,7 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
       // Browsers sturen bestandsnamen als latin1; zet terug naar UTF-8.
       const naam = Buffer.from(f.originalname, "latin1").toString("utf8");
       if (!ONDERSTEUNDE_TYPES.includes(f.mimetype)) {
-        resultaat.push({ bestandsnaam: naam, overgeslagen: "Bestandstype niet ondersteund (gebruik PDF, JPG, PNG of WEBP)." });
+        resultaat.push({ bestandsnaam: naam, overgeslagen: "Bestandstype niet ondersteund (gebruik PDF, JPG, PNG, WEBP of een e-factuur in XML)." });
         continue;
       }
       const hash = crypto.createHash("sha256").update(f.buffer).digest("hex");
@@ -242,7 +268,10 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
   app.get("/api/documenten/:id", (req, res) => res.json(uitvoer(opslag.document(id(req.params.id)))));
   app.get("/api/documenten/:id/bestand", (req, res) => {
     const d = opslag.document(id(req.params.id));
-    res.type(d.mime).setHeader("Content-Disposition", "inline");
+    // Een e-factuur wordt als platte tekst getoond, zodat de browser de inhoud nooit uitvoert.
+    res.type(isXml(d.mime) ? "text/plain; charset=utf-8" : d.mime);
+    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("X-Content-Type-Options", "nosniff");
     res.sendFile(d.pad);
   });
 
@@ -294,16 +323,15 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
     res.json(uitvoer(opslag.document(doc.id)));
   });
 
-  app.post("/api/documenten/:id/goedkeuren", (req, res) => {
-    const doc = opslag.document(id(req.params.id));
+  /** Keurt een document goed. Geeft false terug als er nog fouten in de boeking zitten. */
+  function keurGoed(doc: Document): boolean {
     if (!doc.boeking) throw new Ongeldig("Er is nog geen boeking om goed te keuren.");
     if (doc.status === "goedgekeurd" || doc.status === "geexporteerd") throw new Ongeldig("Dit document is al goedgekeurd.");
     const boeking = doc.boeking;
     const signaleringen = controleer(doc, boeking);
     if (heeftFouten(signaleringen)) {
       opslag.werkDocumentBij(doc.id, { signaleringen, status: "controle" });
-      res.status(409).json({ fout: "Los eerst de fouten op voordat u goedkeurt.", document: uitvoer(opslag.document(doc.id)) });
-      return;
+      return false;
     }
     // Relatie vastleggen en onthouden hoe deze is geboekt, zodat een volgende factuur direct goed gaat.
     const soort = boeking.soort === "inkoop" ? "crediteur" : "debiteur";
@@ -339,15 +367,43 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false) {
       if (bestaand.some((f) => f.tekst === c.tekst && f.relatieNaam === relatie.naam)) continue;
       opslag.bewaarFeedback({ adminId: doc.adminId, documentId: doc.id, bereik: "relatie", relatieNaam: relatie.naam, tekst: c.tekst, bron: "automatisch", actief: true, aangemaakt: new Date().toISOString() });
     }
-    opslag.werkDocumentBij(doc.id, { boeking: { ...boeking, relatieId: relatie.id }, signaleringen, status: "goedgekeurd", gecorrigeerd: correcties.length > 0 || doc.aanwijzing !== "" });
+    opslag.werkDocumentBij(doc.id, { boeking: { ...boeking, relatieId: relatie.id }, signaleringen, status: "goedgekeurd", gecorrigeerd: correcties.length > 0 || doc.aanwijzing !== "", goedgekeurdOp: new Date().toISOString() });
+    return true;
+  }
+
+
+  app.post("/api/documenten/:id/goedkeuren", (req, res) => {
+    const doc = opslag.document(id(req.params.id));
+    if (!keurGoed(doc)) {
+      res.status(409).json({ fout: "Los eerst de fouten op voordat u goedkeurt.", document: uitvoer(opslag.document(doc.id)) });
+      return;
+    }
     res.json(uitvoer(opslag.document(doc.id)));
   });
-
+  /** Keurt in één keer alle documenten goed waarbij geen enkele fout of waarschuwing is gevonden. */
+  app.post("/api/administraties/:id/goedkeuren-zonder-signalen", (req, res) => {
+    let goedgekeurd = 0;
+    // Oudste eerst, zodat een dubbele factuur bij het latere document wordt tegengehouden.
+    for (const doc of opslag.documenten(id(req.params.id)).filter((d) => d.status === "gereed").reverse()) {
+      const actueel = opslag.document(doc.id);
+      if (actueel.boeking && controleer(actueel, actueel.boeking).every((s) => s.niveau === "info") && keurGoed(actueel)) goedgekeurd++;
+    }
+    res.json({ goedgekeurd });
+  });
+  app.get("/api/administraties/:id/btw-overzicht", (req, res) => {
+    const a = id(req.params.id);
+    const van = String(req.query.van ?? "");
+    const tot = String(req.query.tot ?? "");
+    if (!isGeldigeDatum(van) || !isGeldigeDatum(tot) || van > tot) throw new Ongeldig("Ongeldige periode");
+    const inPeriode = opslag.documenten(a).filter((d) => d.boeking && d.boeking.datum >= van && d.boeking.datum <= tot);
+    const definitief = inPeriode.filter((d) => d.status === "goedgekeurd" || d.status === "geexporteerd");
+    res.json({ ...btwOverzicht(definitief.map((d) => d.boeking!), opslag.profiel(a)), nogNietGoedgekeurd: inPeriode.length - definitief.length });
+  });
   app.post("/api/documenten/:id/heropenen", (req, res) => {
     const doc = opslag.document(id(req.params.id));
     if (!doc.boeking) throw new Ongeldig("Geen boeking.");
     const signaleringen = controleer(doc, doc.boeking);
-    opslag.werkDocumentBij(doc.id, { signaleringen, status: statusNaControle(signaleringen), geexporteerdOp: "" });
+    opslag.werkDocumentBij(doc.id, { signaleringen, status: statusNaControle(signaleringen), geexporteerdOp: "", goedgekeurdOp: "" });
     res.json(uitvoer(opslag.document(doc.id)));
   });
   app.post("/api/documenten/:id/opnieuw", (req, res) => {
@@ -467,7 +523,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const opslag = new Opslag(process.env.SCAN_DATA || path.join(hier, "..", "data"));
   const poort = Number(process.env.PORT) || 3000;
   const host = process.env.HOST || "127.0.0.1";
-  maakApp(opslag, demo ? demoExtractor : extraheerMetClaude, demo).listen(poort, host, () => {
+  const wachtwoord = process.env.SCAN_WACHTWOORD || "";
+  if (!["127.0.0.1", "localhost", "::1"].includes(host) && !wachtwoord) {
+    console.error("De server wordt opengezet voor het netwerk (HOST) zonder wachtwoord. Stel SCAN_WACHTWOORD in en start opnieuw.");
+    process.exit(1);
+  }
+  maakApp(opslag, demo ? demoExtractor : extraheerMetClaude, demo, wachtwoord).listen(poort, host, () => {
     console.log(`Scan & Herken draait op http://${host === "0.0.0.0" ? "localhost" : host}:${poort}${demo ? " (demomodus, zonder AI)" : ""}`);
   });
 }

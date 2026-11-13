@@ -107,7 +107,7 @@ $("#nieuweAdmin").addEventListener(
 );
 
 // ---------- Routering ----------
-const paginas = { documenten: paginaDocumenten, document: paginaDocument, feedback: paginaFeedback, export: paginaExport, profiel: paginaProfiel, grootboek: paginaGrootboek, btwcodes: paginaBtwcodes, relaties: paginaRelaties };
+const paginas = { documenten: paginaDocumenten, document: paginaDocument, feedback: paginaFeedback, btw: paginaBtw, export: paginaExport, profiel: paginaProfiel, grootboek: paginaGrootboek, btwcodes: paginaBtwcodes, relaties: paginaRelaties };
 
 async function toon() {
   clearTimeout(verversTimer);
@@ -126,12 +126,17 @@ async function toon() {
   }
 }
 window.addEventListener("hashchange", toon);
+// Ctrl+Enter keurt het geopende document goed.
+window.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") document.getElementById("goedkeurKnop")?.click();
+});
 
 const kop = (titel, uitleg, ...rechts) => h("div", { class: "paginakop" }, h("div", {}, h("h1", {}, titel), uitleg && h("div", { class: "zacht" }, uitleg)), h("div", { class: "knoppen" }, rechts));
 const veld = (label, invoer, klasse = "") => h("label", { class: `veld ${klasse}` }, h("span", {}, label), invoer);
 
 // ---------- Documenten ----------
 let filter = "alle";
+let zoekterm = "";
 
 /** Verkleint grote foto's in de browser, zodat een telefoonfoto snel en binnen de limieten wordt verwerkt. */
 async function verklein(bestand) {
@@ -164,7 +169,7 @@ async function lever(bestanden) {
 
 async function paginaDocumenten() {
   const docs = await api(`/administraties/${adminId}/documenten`);
-  const kies = h("input", { type: "file", multiple: true, accept: "application/pdf,image/*", hidden: true, onchange: probeer((e) => lever([...e.target.files])) });
+  const kies = h("input", { type: "file", multiple: true, accept: "application/pdf,image/*,.xml,text/xml", hidden: true, onchange: probeer((e) => lever([...e.target.files])) });
   const camera = h("input", { type: "file", accept: "image/*", capture: "environment", hidden: true, onchange: probeer((e) => lever([...e.target.files])) });
   const vak = h(
     "div",
@@ -175,7 +180,7 @@ async function paginaDocumenten() {
       ondrop: probeer((e) => (e.preventDefault(), vak.classList.remove("boven"), lever([...e.dataTransfer.files]))),
     },
     h("b", {}, "Sleep facturen en bonnen hierheen"),
-    h("div", { class: "zacht" }, "PDF, JPG, PNG of WEBP · meerdere bestanden tegelijk"),
+    h("div", { class: "zacht" }, "PDF, foto (JPG, PNG, WEBP) of e-factuur (UBL/XML) · meerdere bestanden tegelijk"),
     h("div", { class: "knoppen" }, h("button", { class: "knop hoofd", onclick: () => kies.click() }, "Bestanden kiezen"), h("button", { class: "knop", onclick: () => camera.click() }, "Foto maken"), kies, camera),
   );
 
@@ -187,7 +192,18 @@ async function paginaDocumenten() {
   };
   const namen = { alle: "Alle", controleren: "Te beoordelen", goedgekeurd: "Goedgekeurd", geexporteerd: "Geëxporteerd" };
   const tabs = h("div", { class: "tabs" }, Object.keys(groepen).map((g) => h("button", { class: filter === g ? "actief" : "", onclick: () => ((filter = g), toon()) }, `${namen[g]} (${docs.filter(groepen[g]).length})`)));
-  const zichtbaar = docs.filter(groepen[filter]);
+  const past = (d) => !zoekterm || [d.relatieNaam, d.factuurnummer, d.bestandsnaam, d.datum, euro(d.totaalIncl)].join(" ").toLowerCase().includes(zoekterm.toLowerCase());
+  const zichtbaar = docs.filter(groepen[filter]).filter(past);
+  const zonderSignalen = docs.filter((d) => d.status === "gereed").length;
+  const zoek = h("input", { type: "search", placeholder: "Zoek op relatie, factuurnummer, bedrag of bestand", value: zoekterm, style: "max-width:340px", oninput: (e) => { zoekterm = e.target.value; clearTimeout(verversTimer); verversTimer = setTimeout(async () => { await toon(); const z = document.querySelector("input[type=search]"); z?.focus(); z?.setSelectionRange(z.value.length, z.value.length); }, 250); } });
+  const balk = h(
+    "div",
+    { class: "knoppen", style: "margin-bottom:12px; justify-content:space-between" },
+    zoek,
+    zonderSignalen
+      ? h("button", { class: "knop", title: "Documenten met een waarschuwing of fout blijven staan voor beoordeling", onclick: probeer(async () => { if (!confirm(`${zonderSignalen} document(en) zonder fouten of waarschuwingen in één keer goedkeuren?`)) return; const r = await api(`/administraties/${adminId}/goedkeuren-zonder-signalen`, "POST"); await laadAdmin(); meld(`${r.goedgekeurd} document(en) goedgekeurd`); toon(); }) }, `Keur ${zonderSignalen} zonder signalen goed`)
+      : null,
+  );
 
   const tabel = zichtbaar.length
     ? h(
@@ -211,7 +227,7 @@ async function paginaDocumenten() {
                 h("td", {}, d.soort ? `${d.soort}${d.creditnota ? " (credit)" : ""}` : ""),
                 h("td", { class: "getal" }, euro(d.totaalIncl)),
                 h("td", {}, [d.fouten ? `${d.fouten} fout${d.fouten > 1 ? "en" : ""}` : "", d.waarschuwingen ? `${d.waarschuwingen} let op` : ""].filter(Boolean).join(", ")),
-                h("td", { class: "zacht" }, d.bestandsnaam),
+                h("td", { class: "zacht" }, d.bestandsnaam, d.efactuur ? h("span", { class: "label leert" }, "e-factuur") : null),
               ),
             ),
           ),
@@ -219,7 +235,7 @@ async function paginaDocumenten() {
       )
     : h("div", { class: "leeg" }, docs.length ? "Geen documenten in deze weergave." : "Nog geen documenten. Lever hierboven de eerste factuur of bon aan.");
 
-  vul(inhoud, kop("Documenten", admin.profiel.naam), h("div", { class: "kaart" }, vak), h("div", { class: "kaart" }, tabs, tabel));
+  vul(inhoud, kop("Documenten", admin.profiel.naam), h("div", { class: "kaart" }, vak), h("div", { class: "kaart" }, balk, tabs, tabel));
   if (docs.some((d) => d.status === "wachtrij" || d.status === "bezig")) verversTimer = setTimeout(toon, 2000);
 }
 
@@ -235,7 +251,7 @@ async function paginaDocument(arg) {
   const vast = doc.status === "goedgekeurd" || doc.status === "geexporteerd";
   const b = doc.boeking;
   const bron = `/api/documenten/${id}/bestand`;
-  const voorbeeld = h("div", { class: "voorbeeld" }, doc.mime === "application/pdf" ? h("iframe", { src: bron, title: "Document" }) : h("img", { src: bron, alt: "Document" }));
+  const voorbeeld = h("div", { class: "voorbeeld" }, doc.mime !== "application/pdf" && !/xml/.test(doc.mime) ? h("img", { src: bron, alt: "Document" }) : h("iframe", { src: bron, title: "Document", style: /xml/.test(doc.mime) ? "background:#fff" : "" }) );
 
   const signalenVak = h("div", {});
   const journaalVak = h("div", {});
@@ -366,6 +382,10 @@ async function paginaDocument(arg) {
   }
 
   const relatieLabel = h("span", {}, b.soort === "inkoop" ? "Leverancier" : "Afnemer");
+  const relatieLijst = h("datalist", { id: "relatieLijst" }, admin.relaties.map((r) => h("option", { value: r.naam }, `${r.code} · ${r.soort}`)));
+  const btwVeld = tekst("relatieBtwNummer");
+  const landVeld = tekst("relatieLand");
+  const betaald = { pin: "pin", contant: "contant", creditcard: "creditcard", ideal: "iDEAL", automatische_incasso: "automatische incasso" }[doc.extractie?.betaalwijze];
   const formulier = h(
     "div",
     { class: "kaart" },
@@ -374,15 +394,28 @@ async function paginaDocument(arg) {
       { class: "rooster" },
       veld("Soort", keuze([["inkoop", "Inkoop"], ["verkoop", "Verkoop"]], b.soort, (v) => ((b.soort = v), (b.relatieId = null), (relatieLabel.textContent = v === "inkoop" ? "Leverancier" : "Afnemer"), tekenRegels()))),
       h("label", { class: "veld vink" }, h("input", { type: "checkbox", checked: b.creditnota, disabled: vast, onchange: (e) => ((b.creditnota = e.target.checked), gewijzigd()) }), h("span", {}, "Creditnota")),
-      h("label", { class: "veld breed" }, relatieLabel, h("input", { value: b.relatieNaam, disabled: vast, oninput: (e) => ((b.relatieNaam = e.target.value), (b.relatieId = null), gewijzigd()) })),
-      veld("Btw-nummer relatie", tekst("relatieBtwNummer")),
-      veld("Land (ISO)", tekst("relatieLand")),
+      h("label", { class: "veld breed" }, relatieLabel, relatieLijst, h("input", { list: "relatieLijst", value: b.relatieNaam, disabled: vast, oninput: (e) => {
+        b.relatieNaam = e.target.value;
+        b.relatieId = null;
+        // Kiest u een bestaande relatie uit de lijst, dan worden btw-nummer en land overgenomen.
+        const bekend = admin.relaties.find((r) => r.naam === b.relatieNaam && r.soort === (b.soort === "inkoop" ? "crediteur" : "debiteur"));
+        if (bekend) {
+          b.relatieId = bekend.id;
+          if (bekend.btwNummer) b.relatieBtwNummer = btwVeld.value = bekend.btwNummer;
+          if (bekend.land) b.relatieLand = landVeld.value = bekend.land;
+        }
+        gewijzigd();
+      } })),
+      veld("Btw-nummer relatie", btwVeld),
+      veld("Land (ISO)", landVeld),
       veld("Factuurnummer", tekst("factuurnummer")),
       veld("Factuurdatum", tekst("datum", "date")),
       veld("Vervaldatum", tekst("vervaldatum", "date")),
       veld("Totaal incl. btw", bedrag(b.totaalIncl, (v) => (b.totaalIncl = v))),
       veld("Omschrijving", tekst("omschrijving"), "breed"),
     ),
+    betaald ? h("p", { class: "uitleg", style: "margin:10px 0 0" }, `Volgens het document al betaald per ${betaald}. De boeking loopt via de ${b.soort === "inkoop" ? "crediteur" : "debiteur"}; de betaling wordt in Exact afgeletterd met de bank of kas.`) : null,
+    doc.goedgekeurdOp ? h("p", { class: "uitleg", style: "margin:10px 0 0" }, `Goedgekeurd op ${new Date(doc.goedgekeurdOp).toLocaleString("nl-NL")}${doc.geexporteerdOp ? ` · geëxporteerd op ${new Date(doc.geexporteerdOp).toLocaleString("nl-NL")}` : ""}`) : null,
   );
   const regelsKaart = h(
     "div",
@@ -412,6 +445,8 @@ async function paginaDocument(arg) {
             "button",
             {
               class: "knop hoofd",
+              id: "goedkeurKnop",
+              title: "Sneltoets: Ctrl+Enter",
               onclick: async () => {
                 await bewaarNu();
                 try {
@@ -484,6 +519,60 @@ async function paginaFeedback() {
       h("h2", {}, "Leerpunten"),
       h("p", { class: "uitleg" }, "Elk actief leerpunt gaat mee naar de AI bij het uitlezen van volgende documenten. Leerpunten ‘uit een correctie’ ontstaan vanzelf wanneer u bij het goedkeuren een andere rekening, btw-behandeling of indeling kiest dan de AI voorstelde. U kunt de tekst aanscherpen, een leerpunt uitzetten of verwijderen. Feedback geven doet u bij het document zelf."),
       rijen.length ? h("div", { class: "tabelrol" }, h("table", {}, h("thead", {}, h("tr", {}, ["Actief", "Wat de AI moet weten", "Geldt voor", "Herkomst", "Bron", ""].map((t) => h("th", {}, t)))), h("tbody", {}, rijen))) : h("div", { class: "leeg" }, "Nog geen leerpunten."),
+    ),
+  );
+}
+
+// ---------- Btw-overzicht ----------
+let btwPeriode = null;
+async function paginaBtw() {
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const kwartaal = (jaar, k) => ({ van: iso(new Date(jaar, (k - 1) * 3, 1)), tot: iso(new Date(jaar, k * 3, 0)), naam: `${k}e kwartaal ${jaar}` });
+  const nu = new Date();
+  const k = Math.floor(nu.getMonth() / 3) + 1;
+  const dit = kwartaal(nu.getFullYear(), k);
+  const vorig = k === 1 ? kwartaal(nu.getFullYear() - 1, 4) : kwartaal(nu.getFullYear(), k - 1);
+  const maand = { van: iso(new Date(nu.getFullYear(), nu.getMonth(), 1)), tot: iso(new Date(nu.getFullYear(), nu.getMonth() + 1, 0)), naam: "deze maand" };
+  const jaar = { van: `${nu.getFullYear()}-01-01`, tot: `${nu.getFullYear()}-12-31`, naam: `heel ${nu.getFullYear()}` };
+  btwPeriode ??= dit;
+  const o = await api(`/administraties/${adminId}/btw-overzicht?van=${btwPeriode.van}&tot=${btwPeriode.tot}`);
+  const kies = (p) => h("button", { class: `knop klein ${p.van === btwPeriode.van && p.tot === btwPeriode.tot ? "hoofd" : ""}`, onclick: () => ((btwPeriode = p), toon()) }, p.naam[0].toUpperCase() + p.naam.slice(1));
+  const datum = (sleutel) => h("input", { type: "date", value: btwPeriode[sleutel], style: "width:auto", onchange: (e) => e.target.value && ((btwPeriode = { ...btwPeriode, [sleutel]: e.target.value, naam: "eigen periode" }), toon()) });
+  const rij = (code, omschrijving, grondslag, btw, klasse = "") => h("tr", { class: klasse }, h("td", {}, h("b", {}, code)), h("td", {}, omschrijving), h("td", { class: "getal" }, grondslag == null ? "" : euro(grondslag)), h("td", { class: "getal" }, btw == null ? "" : euro(btw)));
+  vul(
+    inhoud,
+    kop("Btw-overzicht", "De goedgekeurde boekingen ingedeeld naar de rubrieken van de aangifte omzetbelasting."),
+    h("div", { class: "kaart" }, h("div", { class: "knoppen" }, kies(dit), kies(vorig), kies(maand), kies(jaar), h("span", { class: "zacht" }, "of van"), datum("van"), h("span", { class: "zacht" }, "t/m"), datum("tot"))),
+    o.nogNietGoedgekeurd ? h("ul", { class: "signalen", style: "margin-bottom:16px" }, h("li", { class: "waarschuwing" }, h("b", {}, "Let op"), `${o.nogNietGoedgekeurd} document(en) in deze periode ${o.nogNietGoedgekeurd === 1 ? "is" : "zijn"} nog niet goedgekeurd en ${o.nogNietGoedgekeurd === 1 ? "telt" : "tellen"} niet mee.`)) : null,
+    h(
+      "div",
+      { class: "kaart" },
+      o.aantalBoekingen
+        ? h(
+            "div",
+            { class: "tabelrol" },
+            h(
+              "table",
+              {},
+              h("thead", {}, h("tr", {}, h("th", {}, "Rubriek"), h("th", {}, "Omschrijving"), h("th", { class: "getal" }, "Omzet / grondslag"), h("th", { class: "getal" }, "Btw"))),
+              h(
+                "tbody",
+                {},
+                o.rubrieken.map((r) => rij(r.code, r.omschrijving, r.grondslag, ["1e", "3a", "3b"].includes(r.code) ? null : r.btw)),
+                rij("5a", "Verschuldigde btw (rubrieken 1 t/m 4)", null, o.verschuldigd, "totaalrij"),
+                rij("5b", "Voorbelasting", null, o.voorbelasting),
+                rij("", o.saldo >= 0 ? "Te betalen" : "Terug te vragen", null, Math.abs(o.saldo), "totaalrij"),
+              ),
+            ),
+          )
+        : h("div", { class: "leeg" }, "Geen goedgekeurde boekingen met een factuurdatum in deze periode."),
+    ),
+    h(
+      "div",
+      { class: "kaart uitleg" },
+      h("h2", {}, "Waarvoor dit overzicht is"),
+      h("p", {}, `Gebaseerd op ${o.aantalBoekingen} goedgekeurde boeking(en), ingedeeld op factuurdatum. Gebruik het als controle op wat Exact na de import berekent.`),
+      h("p", {}, "Het is geen aangifte: boekingen die buiten dit programma om in Exact komen (bank, kas, memoriaal, privégebruik, correcties) zitten er niet in. De aangifte zelf rondt af op hele euro's. Verlegde btw is gerekend tegen 21%."),
     ),
   );
 }

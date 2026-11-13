@@ -11,6 +11,7 @@ Facturen en bonnen aanleveren, met AI laten uitlezen, omzetten in journaalposten
 5. **Beoordelen** – document en boeking naast elkaar; aanpassen, journaalpost bekijken, goedkeuren.
 6. **Feedback en leren** – elke correctie op een AI-voorstel wordt een leerpunt, en u kunt de AI in eigen woorden iets uitleggen. Zie hieronder.
 7. **Export** – Exact Online XML, CSV, en een journaalpostenoverzicht ter controle.
+8. **Btw-overzicht** – de goedgekeurde boekingen per periode ingedeeld naar de rubrieken van de aangifte, als controle op Exact.
 
 ## Starten
 
@@ -40,6 +41,7 @@ Open daarna http://localhost:3000.
 | `SCAN_MODEL` | AI-model | `claude-opus-5-5` |
 | `SCAN_DATA` | Map voor database en bestanden | `./data` |
 | `PORT` / `HOST` | Adres van de webserver | `3000` / `127.0.0.1` |
+| `SCAN_WACHTWOORD` | Wachtwoord voor de webapplicatie (verplicht zodra `HOST` niet de eigen computer is) | – |
 | `SCAN_DEMO=1` | Demomodus zonder AI | uit |
 
 ## Eerste inrichting van een administratie
@@ -56,9 +58,21 @@ Open daarna http://localhost:3000.
 - **Feedback & kwaliteit**: laat zien welk deel van de boekingen zonder correctie is goedgekeurd, bij welke relaties u het vaakst corrigeert en alle leerpunten. Leerpunten kunt u aanscherpen, uitzetten of verwijderen.
 - Actieve leerpunten gaan bij elk volgend document mee naar de AI. Leesfouten (een verkeerd gelezen bedrag of nummer) tellen mee in de kwaliteitscijfers, maar worden geen leerpunt.
 
+## E-facturen (UBL)
+
+Naast PDF's en foto's kunt u e-facturen in XML aanleveren (UBL 2.1, zoals SI-UBL en Peppol). Factuurnummer, datum en soort komen dan rechtstreeks uit het bestand, en de boeking wordt gecontroleerd tegen het totaal en de btw in het bestand zelf. Een afwijking blokkeert de goedkeuring. De AI kiest alleen nog de grootboekrekening en de btw-behandeling.
+
+## Sneller werken
+
+- **Zoeken** in de documentenlijst op relatie, factuurnummer, bedrag of bestandsnaam.
+- **In één keer goedkeuren** van alle documenten zonder fout of waarschuwing; de rest blijft staan voor beoordeling.
+- **Ctrl+Enter** keurt het geopende document goed en opent het volgende.
+- **Bestaande relatie kiezen** bij een document: btw-nummer en land worden overgenomen.
+- Bij elk document staat wanneer het is goedgekeurd en geëxporteerd.
+
 ## Voorbeelddocumenten
 
-In de map `voorbeelden/` staan vijf oefendocumenten. In de demomodus worden ze aan hun bestandsnaam herkend; de tankbonnen laten zien hoe feedback werkt.
+In de map `voorbeelden/` staan zes oefendocumenten, waaronder een e-factuur. In de demomodus worden ze aan hun bestandsnaam herkend; de tankbonnen laten zien hoe feedback werkt.
 
 ## Btw-controles
 
@@ -103,7 +117,7 @@ Geen enkele AI leest elk document gegarandeerd foutloos. Het programma is daarom
 
 - Documenten worden voor het uitlezen naar de API van Anthropic gestuurd. Regel dit in de verwerkersafspraken met klanten.
 - De database en de bestanden staan lokaal in de datamap.
-- Er is nog geen inlogscherm. De server luistert daarom standaard alleen op de eigen computer. Zet hem niet open op een netwerk of internet zonder eerst toegangsbeveiliging toe te voegen.
+- De server luistert standaard alleen op de eigen computer. Wilt u hem via het netwerk bereikbaar maken (`HOST=0.0.0.0`), dan is `SCAN_WACHTWOORD` verplicht; de browser vraagt dan om dat wachtwoord (de gebruikersnaam is vrij). Dit is één gedeeld wachtwoord, geen gebruikersbeheer, en het beschermt alleen goed achter een https-verbinding.
 
 ## Ontwikkelen
 

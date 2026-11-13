@@ -12,6 +12,7 @@ import {
 } from "./btw.ts";
 import { isGeldigeDatum, maakJournaalpost, zelfdeNaam } from "./boeking.ts";
 import type { Boeking, Extractie, Grootboekrekening, Profiel, Signalering } from "./types.ts";
+import type { UblKern } from "./ubl.ts";
 
 const euro = (c: number) => (c / 100).toLocaleString("nl-NL", { style: "currency", currency: "EUR" });
 
@@ -22,6 +23,8 @@ export interface ControleContext {
   /** Er bestaat al een ander document met dezelfde relatie en hetzelfde factuurnummer. */
   dubbel: boolean;
   vandaag: string;
+  /** Kerngegevens uit het e-factuurbestand zelf, als het document een UBL-factuur is. */
+  ubl?: UblKern | null;
 }
 
 export function valideer(
@@ -57,6 +60,17 @@ export function valideer(
   if (b.creditnota && b.totaalIncl < 0) let_op("CREDITNOTA", "Een creditnota wordt met positieve bedragen vastgelegd; het programma keert de boeking zelf om. Controleer de tekens.");
   if (b.valuta !== "EUR") let_op("VALUTA", `Factuur in ${b.valuta}. Bedragen moeten naar euro worden omgerekend tegen de koers van de factuurdatum; controleer de bedragen.`);
   if (ctx.dubbel) fout("DUBBEL", "Er is al een document met deze relatie en dit factuurnummer. Mogelijk dubbel geboekt.");
+
+  // --- E-factuur: de boeking moet aansluiten op de gegevens in het bestand zelf ---
+  if (ctx.ubl) {
+    const u = ctx.ubl;
+    if (Math.abs(b.totaalIncl) !== Math.abs(u.totaalIncl)) fout("UBL", `Het totaal van de boeking (${euro(b.totaalIncl)}) wijkt af van het totaal in de e-factuur (${euro(Math.abs(u.totaalIncl))}).`);
+    if (b.factuurnummer !== u.factuurnummer) fout("UBL", `Het factuurnummer wijkt af van de e-factuur (${u.factuurnummer}).`);
+    if (u.datum && b.datum !== u.datum) fout("UBL", `De factuurdatum wijkt af van de e-factuur (${u.datum}).`);
+    if (b.creditnota !== u.creditnota) fout("UBL", u.creditnota ? "De e-factuur is een creditnota." : "De e-factuur is geen creditnota.");
+    const somBtw = b.regels.reduce((t, r) => t + r.btwBedrag, 0);
+    if (Math.abs(somBtw) !== Math.abs(u.totaalBtw)) let_op("UBL", `De btw in de boeking (${euro(somBtw)}) wijkt af van het btw-totaal in de e-factuur (${euro(Math.abs(u.totaalBtw))}).`);
+  }
 
   // --- Rekenkundige controles ---
   const somRegels = b.regels.reduce((t, r) => t + r.bedragExcl + r.btwBedrag, 0);

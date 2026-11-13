@@ -171,6 +171,8 @@ export interface Document {
   aiVoorstel: Boeking | null;
   /** Aanwijzing van de boekhouder voor het opnieuw uitlezen van dit document. */
   aanwijzing: string;
+  /** Tijdstip van goedkeuring (ISO), leeg als het document niet is goedgekeurd. */
+  goedgekeurdOp: string;
   /** Bij goedkeuring: moest het AI-voorstel worden aangepast? null = nog niet goedgekeurd. */
   gecorrigeerd: boolean | null;
 }

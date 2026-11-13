@@ -6,6 +6,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import { BEHANDELINGEN } from "./btw.ts";
+import { isXml, zonderBijlagen } from "./ubl.ts";
 import type { Extractie, Feedback, Grootboekrekening, Profiel, Relatie } from "./types.ts";
 
 export const MODEL = process.env.SCAN_MODEL || "claude-opus-5-5";
@@ -152,15 +153,16 @@ export interface ExtractieInvoer {
 
 export type Extractor = (invoer: ExtractieInvoer) => Promise<Extractie>;
 
-export const ONDERSTEUNDE_TYPES = ["application/pdf", "image/jpeg", "image/png", "image/webp", "image/gif"];
+export const ONDERSTEUNDE_TYPES = ["application/pdf", "image/jpeg", "image/png", "image/webp", "image/gif", "text/xml", "application/xml"];
 
 let client: Anthropic | null = null;
 
 async function vraag(invoer: ExtractieInvoer, herkansing?: string): Promise<Extractie> {
   client ??= new Anthropic();
   const data = invoer.bestand.toString("base64");
-  const document: Anthropic.Beta.BetaContentBlockParam =
-    invoer.mime === "application/pdf"
+  const document: Anthropic.Beta.BetaContentBlockParam = isXml(invoer.mime)
+    ? { type: "text", text: `Dit document is een e-factuur (XML). Neem de bedragen, nummers en datums exact over uit het bestand.\n\n${zonderBijlagen(invoer.bestand.toString("utf8"))}` }
+    : invoer.mime === "application/pdf"
       ? { type: "document", source: { type: "base64", media_type: "application/pdf", data } }
       : { type: "image", source: { type: "base64", media_type: invoer.mime as "image/jpeg" | "image/png" | "image/webp" | "image/gif", data } };
 
@@ -295,6 +297,23 @@ export const demoExtractor: Extractor = async ({ bestandsnaam, profiel, relaties
       vermeldingen: ["VAT reverse charged"],
       betaalwijze: "creditcard",
       omschrijving: "Software-abonnement",
+    },
+    efactuur: {
+      ...basis,
+      documentType: "inkoopfactuur",
+      afzender: { ...leeg, naam: "Meelgroothandel Van Dijk B.V.", btwNummer: "NL805566778B01", kvkNummer: "34567890", iban: "NL20INGB0001234567" },
+      factuurnummer: "2026-1187",
+      factuurdatum: "2026-11-10",
+      vervaldatum: "2026-12-10",
+      regels: [
+        { omschrijving: "Tarwebloem", bedragExcl: 420, btwPercentage: 9, btwBedrag: 37.8, btwBehandeling: "NL_LAAG", categorie: "overig", grootboekCode: "7000" },
+        { omschrijving: "Transportkosten", bedragExcl: 35, btwPercentage: 21, btwBedrag: 7.35, btwBehandeling: "NL_HOOG", categorie: "overig", grootboekCode: "4430" },
+      ],
+      totaalExcl: 455,
+      totaalBtw: 45.15,
+      totaalIncl: 500.15,
+      betalingskenmerk: "2026-1187",
+      omschrijving: "Meel en transport",
     },
     shell: {
       ...basis,
