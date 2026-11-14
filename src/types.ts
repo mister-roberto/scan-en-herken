@@ -71,6 +71,8 @@ export interface Relatie {
   /** Standaardrekening altijd toepassen, ook als de AI iets anders voorstelt. */
   vast: boolean;
   instructie: string;
+  /** Documenten van deze relatie zonder fout of waarschuwing worden na het uitlezen direct goedgekeurd. */
+  autoAkkoord?: boolean;
   /** Door dit programma aangemaakt en nog niet naar Exact gestuurd. */
   nieuw: boolean;
 }
@@ -125,6 +127,8 @@ export interface Extractie {
     tariefVermeld: boolean;
     btwBedragVermeld: boolean;
   };
+  /** Als het bestand meer dan één factuur bevat: de paginabereiken per factuur. */
+  documentenInBestand?: { vanPagina: number; totPagina: number }[];
   /** Letterlijke btw-vermeldingen op het document, bv. "margeregeling" of "btw verlegd". */
   vermeldingen?: string[];
 }
@@ -163,7 +167,7 @@ export interface Signalering {
   tekst: string;
 }
 
-export type DocumentStatus = "wachtrij" | "bezig" | "controle" | "gereed" | "goedgekeurd" | "geexporteerd" | "fout";
+export type DocumentStatus = "wachtrij" | "bezig" | "controle" | "gereed" | "wacht" | "goedgekeurd" | "geexporteerd" | "fout";
 
 export interface Document {
   id: number;
@@ -183,6 +187,8 @@ export interface Document {
   aiVoorstel: Boeking | null;
   /** Aanwijzing van de boekhouder voor het opnieuw uitlezen van dit document. */
   aanwijzing: string;
+  /** Notitie van de boekhouder, bv. waarom het document in de wacht staat. */
+  notitie: string;
   /** Tijdstip van goedkeuring (ISO), leeg als het document niet is goedgekeurd. */
   goedgekeurdOp: string;
   /** Bij goedkeuring: moest het AI-voorstel worden aangepast? null = nog niet goedgekeurd. */

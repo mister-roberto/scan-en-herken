@@ -12,7 +12,7 @@ import {
 } from "./btw.ts";
 import { isGeldigeDatum, maakJournaalpost, zelfdeNaam } from "./boeking.ts";
 import { beoordeelFactuur } from "./factuureisen.ts";
-import type { Boeking, Extractie, Grootboekrekening, Profiel, Signalering } from "./types.ts";
+import type { Boeking, Extractie, Grootboekrekening, Profiel, Relatie, Signalering } from "./types.ts";
 import type { UblKern } from "./ubl.ts";
 
 const euro = (c: number) => (c / 100).toLocaleString("nl-NL", { style: "currency", currency: "EUR" });
@@ -22,6 +22,10 @@ export interface ControleContext {
   /** Er bestaat al een ander document met dezelfde relatie en hetzelfde factuurnummer. */
   dubbel: boolean;
   vandaag: string;
+  /** De bekende relatie bij dit document, als die er is. */
+  relatie?: Relatie | null;
+  /** Totaalbedragen (centen) van eerder goedgekeurde documenten van deze relatie. */
+  eerdereBedragen?: number[];
   /** Kerngegevens uit het e-factuurbestand zelf, als het document een UBL-factuur is. */
   ubl?: UblKern | null;
 }
@@ -198,6 +202,27 @@ export function valideer(
   }
   if (profiel.btwStatus === "gemengd" && aftrekGevraagd) {
     info("PRO_RATA", `Voorbelasting wordt voor ${profiel.proRataPercentage}% in aftrek gebracht (pro rata). Gebruik in Exact een btw-code met hetzelfde aftrekpercentage.`);
+  }
+
+  // --- Signalen van factuurfraude en vergissingen ---
+  const schoonIban = (i: string | null | undefined) => (i ?? "").toUpperCase().replace(/\s/g, "");
+  const ibanOpFactuur = schoonIban(inkoop ? ex?.afzender.iban : null);
+  if (inkoop && ctx.relatie !== undefined) {
+    const bekend = schoonIban(ctx.relatie?.iban);
+    if (ibanOpFactuur && bekend && ibanOpFactuur !== bekend) {
+      let_op("IBAN_GEWIJZIGD", `Het rekeningnummer op deze factuur (${ibanOpFactuur}) wijkt af van het bekende rekeningnummer van deze leverancier (${bekend}). Een gewijzigd rekeningnummer is een bekend kenmerk van factuurfraude: laat de klant dit telefonisch nagaan via een bekend nummer voordat er wordt betaald. Klopt de wijziging, pas het nummer dan aan bij Relaties.`);
+    }
+    if (!ctx.relatie && b.relatieNaam.trim()) {
+      info("NIEUWE_RELATIE", `Eerste factuur van deze leverancier.${ibanOpFactuur ? ` Controleer of het rekeningnummer ${ibanOpFactuur} bij deze leverancier hoort.` : ""}`);
+    }
+    const eerder = ctx.eerdereBedragen ?? [];
+    if (eerder.length >= 3 && Math.abs(b.totaalIncl) > 3 * Math.max(...eerder.map(Math.abs))) {
+      let_op("BEDRAG_ONGEBRUIKELIJK", `Het factuurbedrag (${euro(b.totaalIncl)}) is meer dan drie keer zo hoog als de hoogste eerdere factuur van deze leverancier (${euro(Math.max(...eerder.map(Math.abs)))}). Controleer of dit klopt.`);
+    }
+  }
+  if ((ex?.documentenInBestand?.length ?? 0) > 1) {
+    const delen = ex!.documentenInBestand!.map((d) => (d.vanPagina === d.totPagina ? `${d.vanPagina}` : `${d.vanPagina}-${d.totPagina}`)).join(", ");
+    let_op("MEERDERE", `Dit bestand lijkt ${ex!.documentenInBestand!.length} facturen te bevatten (pagina's ${delen}). Alleen de eerste is uitgelezen; splits het bestand.`);
   }
 
   // --- Bijzondere regelingen die op het document worden genoemd ---

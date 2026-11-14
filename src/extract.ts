@@ -53,6 +53,9 @@ export const ExtractieSchema = z.object({
   zekerheid: z.enum(["hoog", "middel", "laag"]),
   onzekerheden: z.array(z.string()).describe("Concrete twijfelpunten die een mens moet controleren; leeg als er geen zijn"),
   vermeldingen: z.array(z.string()).describe("Letterlijke btw-vermeldingen op het document, bv. 'btw verlegd', 'margeregeling', 'vrijgesteld van btw'; leeg als er geen zijn"),
+  documentenInBestand: z
+    .array(z.object({ vanPagina: z.number(), totPagina: z.number() }))
+    .describe("Alleen als het bestand meer dan één factuur of bon bevat: per document de eerste en laatste pagina. Anders leeg. Lees dan alleen het eerste document uit."),
   factuurkenmerken: z
     .object({
       adresAfzenderVermeld: z.boolean().describe("Het volledige adres van de afzender staat op het document"),
@@ -260,6 +263,7 @@ export const demoExtractor: Extractor = async ({ bestandsnaam, profiel, relaties
     onzekerheden: [],
     vermeldingen: [],
     vervaldatum: null,
+    documentenInBestand: /verzamel/i.test(bestandsnaam) && !/deel\d/i.test(bestandsnaam) ? [{ vanPagina: 1, totPagina: 1 }, { vanPagina: 2, totPagina: 2 }] : [],
     factuurkenmerken: { adresAfzenderVermeld: true, adresAfnemerVermeld: true, btwNummerAfnemerVermeld: true, aardEnHoeveelheidVermeld: true, leverdatumVermeld: false, grondslagPerTariefVermeld: true, eenheidsprijsVermeld: true, tariefVermeld: true, btwBedragVermeld: true },
   };
   const bon = { ...basis.factuurkenmerken, adresAfnemerVermeld: false, btwNummerAfnemerVermeld: false };

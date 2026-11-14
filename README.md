@@ -92,6 +92,20 @@ Naast PDF's en foto's kunt u e-facturen in XML aanleveren (UBL 2.1, zoals SI-UBL
 - **Bestaande relatie kiezen** bij een document: btw-nummer en land worden overgenomen.
 - Bij elk document staat wanneer het is goedgekeurd en geëxporteerd.
 
+## Functies naar aanleiding van de marktvergelijking
+
+Vergeleken met onder meer Basecone, Dext, Klippa/Doxis SpendControl, TriFact365 en Exact Scan & Herken zijn toegevoegd:
+
+- **Fraudesignalen**: een rekeningnummer dat afwijkt van het bekende nummer van de leverancier, een eerste factuur van een nieuwe leverancier, en een bedrag dat meer dan drie keer zo hoog is als eerdere facturen van die leverancier.
+- **In de wacht met notitie**: een document parkeren met de reden erbij, en een concept-mail aan de klant met de ontbrekende factuurvereisten.
+- **Auto-akkoord per relatie**: documenten van een vertrouwde relatie zonder fout of waarschuwing worden na het uitlezen direct goedgekeurd.
+- **Splitsen**: een pdf met meerdere facturen opdelen in losse documenten; de AI doet een voorstel voor de pagina's.
+- **Inleesmap**: bestanden in `data/inleesmap/<nummer administratie>/` komen vanzelf binnen (scanner, e-mailregel, gesynchroniseerde map). Verwerkte bestanden gaan naar de submap `verwerkt`.
+
+Relaties worden niet meer op alleen het rekeningnummer gekoppeld, omdat leveranciers een nummer kunnen delen (factoring).
+
+Nog niet aanwezig, wel gangbaar in de markt: aanleveren per e-mail, autorisatie door de klant, een directe koppeling met het boekhoudpakket, ontvangst via Peppol, een mobiele app en kostenplaatsen.
+
 ## Voorbeelddocumenten
 
 In de map `voorbeelden/` staan zeven oefendocumenten, waaronder een e-factuur en een factuur die niet aan de factuurvereisten voldoet. In de demomodus worden ze aan hun bestandsnaam herkend; de tankbonnen laten zien hoe feedback werkt.

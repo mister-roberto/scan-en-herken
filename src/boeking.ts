@@ -49,11 +49,11 @@ export function zoekRelatie(partij: Partij, soort: Relatie["soort"], relaties: R
   const kandidaten = relaties.filter((r) => r.soort === soort);
   const btw = normaliseerBtwNummer(partij.btwNummer);
   const kvk = (partij.kvkNummer ?? "").replace(/\D/g, "");
-  const iban = (partij.iban ?? "").toUpperCase().replace(/\s/g, "");
+  // Bewust niet op rekeningnummer: verschillende leveranciers kunnen hetzelfde nummer delen (factoring),
+  // en een afwijkend nummer bij een bekende leverancier moet juist als signaal zichtbaar blijven.
   return (
     (btw && kandidaten.find((r) => normaliseerBtwNummer(r.btwNummer) === btw)) ||
     (kvk && kandidaten.find((r) => r.kvk.replace(/\D/g, "") === kvk)) ||
-    (iban && kandidaten.find((r) => r.iban.toUpperCase().replace(/\s/g, "") === iban)) ||
     kandidaten.find((r) => zelfdeNaam(r.naam, partij.naam)) ||
     null
   );

@@ -73,7 +73,7 @@ function centen(tekst) {
   const n = Number(s);
   return Number.isFinite(n) ? Math.round(n * 100) : 0;
 }
-const STATUS = { wachtrij: "In wachtrij", bezig: "Wordt uitgelezen…", controle: "Controleren", gereed: "Klaar voor akkoord", goedgekeurd: "Goedgekeurd", geexporteerd: "Geëxporteerd", fout: "Mislukt" };
+const STATUS = { wachtrij: "In wachtrij", bezig: "Wordt uitgelezen…", controle: "Controleren", gereed: "Klaar voor akkoord", wacht: "In de wacht", goedgekeurd: "Goedgekeurd", geexporteerd: "Geëxporteerd", fout: "Mislukt" };
 const chip = (status) => h("span", { class: `chip ${status}` }, STATUS[status] ?? status);
 
 // ---------- Toestand ----------
@@ -208,6 +208,7 @@ async function paginaStart() {
       { class: "tegels", style: "margin-bottom:16px" },
       tegel(String(open), "te beoordelen", "#/documenten"),
       tegel(String(klaar), "goedgekeurd, klaar voor export", "#/export"),
+      tegel(String(aantal("wacht")), "in de wacht", "#/documenten"),
       tegel(String(aantal("geexporteerd")), "geëxporteerd naar Exact", "#/documenten"),
       tegel(fb.kwaliteit.percentage == null ? "–" : `${fb.kwaliteit.percentage}%`, "in één keer goed", "#/feedback"),
     ),
@@ -274,10 +275,11 @@ async function paginaDocumenten() {
   const groepen = {
     alle: () => true,
     controleren: (d) => ["controle", "gereed", "fout"].includes(d.status),
+    wacht: (d) => d.status === "wacht",
     goedgekeurd: (d) => d.status === "goedgekeurd",
     geexporteerd: (d) => d.status === "geexporteerd",
   };
-  const namen = { alle: "Alle", controleren: "Te beoordelen", goedgekeurd: "Goedgekeurd", geexporteerd: "Geëxporteerd" };
+  const namen = { alle: "Alle", controleren: "Te beoordelen", wacht: "In de wacht", goedgekeurd: "Goedgekeurd", geexporteerd: "Geëxporteerd" };
   const tabs = h("div", { class: "tabs" }, Object.keys(groepen).map((g) => h("button", { class: filter === g ? "actief" : "", onclick: () => ((filter = g), toon()) }, `${namen[g]} (${docs.filter(groepen[g]).length})`)));
   const past = (d) => !zoekterm || [d.relatieNaam, d.factuurnummer, d.bestandsnaam, d.datum, euro(d.totaalIncl)].join(" ").toLowerCase().includes(zoekterm.toLowerCase());
   const zichtbaar = docs.filter(groepen[filter]).filter(past);
@@ -313,7 +315,7 @@ async function paginaDocumenten() {
                 h("td", {}, d.datum),
                 h("td", {}, d.soort ? `${d.soort}${d.creditnota ? " (credit)" : ""}` : ""),
                 h("td", { class: "getal" }, euro(d.totaalIncl)),
-                h("td", {}, [d.fouten ? `${d.fouten} fout${d.fouten > 1 ? "en" : ""}` : "", d.waarschuwingen ? `${d.waarschuwingen} let op` : ""].filter(Boolean).join(", ")),
+                h("td", { title: d.notitie || null, style: "max-width:220px;overflow:hidden;text-overflow:ellipsis" }, d.status === "wacht" && d.notitie ? d.notitie : [d.fouten ? `${d.fouten} fout${d.fouten > 1 ? "en" : ""}` : "", d.waarschuwingen ? `${d.waarschuwingen} let op` : ""].filter(Boolean).join(", ")),
                 h("td", { class: "zacht", title: d.bestandsnaam }, d.efactuur ? h("span", { class: "label leert", style: "margin:0 6px 0 0" }, "e-factuur") : null, d.bestandsnaam),
               ),
             ),
@@ -322,7 +324,7 @@ async function paginaDocumenten() {
       )
     : h("div", { class: "leeg" }, docs.length ? "Geen documenten in deze weergave." : "Nog geen documenten. Lever hierboven de eerste factuur of bon aan.");
 
-  vul(inhoud, kop("Documenten", "Aanleveren, laten uitlezen en beoordelen"), h("div", { class: "kaart" }, vak), h("div", { class: "kaart" }, balk, tabs, tabel));
+  vul(inhoud, kop("Documenten", "Aanleveren, laten uitlezen en beoordelen"), h("div", { class: "kaart" }, vak, h("p", { class: "uitleg", style: "margin:10px 0 0" }, "Of zet bestanden in de inleesmap van deze administratie (bv. vanaf de scanner of een e-mailregel); ze komen dan vanzelf binnen: ", h("code", {}, admin.inleesmap))), h("div", { class: "kaart" }, balk, tabs, tabel));
   if (docs.some((d) => d.status === "wachtrij" || d.status === "bezig")) verversTimer = setTimeout(toon, 2000);
 }
 
@@ -578,15 +580,64 @@ async function paginaDocument(arg) {
             "Goedkeuren",
           ),
           h("button", { class: "knop", onclick: probeer(async () => (confirm("Het document opnieuw laten uitlezen? Uw wijzigingen gaan verloren.") && (await api(`/documenten/${id}/opnieuw`, "POST"), toon()))) }, "Opnieuw uitlezen"),
+          doc.mime === "application/pdf"
+            ? h(
+                "button",
+                {
+                  class: "knop",
+                  title: "Voor een pdf die meer dan één factuur bevat",
+                  onclick: probeer(async () => {
+                    const voorstel = (doc.extractie?.documentenInBestand ?? []).map((d) => (d.vanPagina === d.totPagina ? d.vanPagina : `${d.vanPagina}-${d.totPagina}`)).join(", ");
+                    const delen = prompt("Splits deze pdf in losse documenten. Geef per document de pagina's, gescheiden door komma's (bv. 1-2, 3, 4-5):", voorstel || "1, 2");
+                    if (!delen) return;
+                    const r = await api(`/documenten/${id}/splitsen`, "POST", { delen });
+                    meld(`Gesplitst in ${r.documenten.length} documenten; ze worden uitgelezen`);
+                    location.hash = "#/documenten";
+                  }),
+                },
+                "Splitsen…",
+              )
+            : null,
           verwijderKnop(id),
         ],
+  );
+
+  // Opvolging: notitie, in de wacht zetten en een concept-mail aan de klant.
+  const notitieVeld = h("textarea", { rows: 2, style: "min-height:0", placeholder: "Bv. juiste factuur opgevraagd bij de klant op 14-11.", onchange: probeer(async (e) => { doc.notitie = (await api(`/documenten/${id}/notitie`, "PUT", { notitie: e.target.value })).notitie; }) }, doc.notitie);
+  const mailKlant = () => {
+    const ontbreekt = doc.factuureisen?.ontbreekt ?? [];
+    const regels = [
+      "Beste relatie,",
+      "",
+      `Bij het verwerken van de factuur van ${b.relatieNaam}${b.factuurnummer ? ` met nummer ${b.factuurnummer}` : ""}${b.datum ? ` van ${b.datum.split("-").reverse().join("-")}` : ""} (${euro(b.totaalIncl)} euro) hebben wij een vraag.`,
+      "",
+      ...(ontbreekt.length ? ["De factuur voldoet niet aan de wettelijke factuurvereisten. Op de factuur ontbreekt:", ...ontbreekt.map((o) => `- ${o}`), "", "Zonder juiste factuur kan de aftrek van btw bij een controle worden geweigerd. Wilt u bij de leverancier een gecorrigeerde factuur opvragen en die aan ons doorsturen?"] : [notitieVeld.value || "[Vul hier uw vraag in]"]),
+      "",
+      "Met vriendelijke groet,",
+      "Beuk Accountants & Belastingadviseurs",
+    ];
+    location.href = `mailto:?subject=${encodeURIComponent(`Vraag over factuur ${b.relatieNaam} ${b.factuurnummer}`.trim())}&body=${encodeURIComponent(regels.join("\n"))}`;
+  };
+  const opvolging = h(
+    "div",
+    { class: "kaart" },
+    h("h2", {}, "Notitie en opvolging"),
+    notitieVeld,
+    h(
+      "div",
+      { class: "knoppen", style: "margin-top:8px" },
+      doc.status === "wacht"
+        ? h("button", { class: "knop", onclick: probeer(async () => (await api(`/documenten/${id}/heropenen`, "POST"), meld("Uit de wacht gehaald"), toon())) }, "Uit de wacht halen")
+        : !vast && h("button", { class: "knop", onclick: probeer(async () => { await bewaarNu(); await api(`/documenten/${id}/wacht`, "POST", { notitie: notitieVeld.value }); meld("In de wacht gezet"); const rest = (await api(`/administraties/${adminId}/documenten`)).filter((d) => ["controle", "gereed"].includes(d.status)).reverse(); const v = rest.find((d) => d.id > id) ?? rest[0]; location.hash = v ? `#/document/${v.id}` : "#/documenten"; }) }, "Zet in de wacht"),
+      h("button", { class: "knop", onclick: mailKlant, title: "Opent uw e-mailprogramma met een concepttekst" }, "Concept-mail aan klant"),
+    ),
   );
 
   tekenRegels();
   tekenUitkomst();
   vul(inhoud, 
     kop(`${b.relatieNaam || doc.bestandsnaam}`, doc.bestandsnaam, kopKnoppen),
-    h("div", { class: "splits" }, voorbeeld, h("div", {}, formulier, regelsKaart, h("div", { class: "kaart" }, signalenVak), doc.factuureisen ? h("div", { class: "kaart" }, eisenVak) : null, h("div", { class: "kaart" }, journaalVak), h("div", { class: "kaart" }, feedbackVak), acties)),
+    h("div", { class: "splits" }, voorbeeld, h("div", {}, formulier, regelsKaart, h("div", { class: "kaart" }, signalenVak), doc.factuureisen ? h("div", { class: "kaart" }, eisenVak) : null, h("div", { class: "kaart" }, journaalVak), h("div", { class: "kaart" }, feedbackVak), opvolging, acties)),
   );
 }
 
@@ -878,9 +929,11 @@ async function paginaRelaties() {
       h("td", {}, inv(r, "naam", "min-width:160px"), r.nieuw ? h("div", { class: "uitleg" }, "nieuw — gaat mee in de XML-export") : null),
       h("td", {}, r.soort),
       h("td", {}, inv(r, "btwNummer", "width:150px")),
+      h("td", {}, inv(r, "iban", "width:190px")),
       h("td", {}, kies(gbOpties, r, "standaardGrootboek")),
       h("td", {}, kies(btwOpties, r, "standaardBtw")),
       h("td", { style: "text-align:center" }, h("input", { type: "checkbox", checked: r.vast, title: "Altijd deze rekening en btw gebruiken", onchange: (e) => wijzig(r, { vast: e.target.checked }) })),
+      h("td", { style: "text-align:center" }, h("input", { type: "checkbox", checked: r.autoAkkoord, title: "Documenten zonder fout of waarschuwing direct goedkeuren", onchange: (e) => wijzig(r, { autoAkkoord: e.target.checked }) })),
       h("td", {}, inv(r, "instructie", "min-width:160px")),
       h("td", {}, h("button", { class: "knop klein gevaar", onclick: probeer(async () => (confirm(`Relatie ${r.naam} verwijderen?`) && (await api(`/relaties/${r.id}`, "DELETE"), toon()))) }, "×")),
     ),
@@ -890,8 +943,8 @@ async function paginaRelaties() {
     h(
       "div",
       { class: "kaart" },
-      h("p", { class: "uitleg" }, "Bij elke goedkeuring onthoudt het programma op welke rekening en met welke btw een relatie is geboekt; de AI gebruikt dat bij de volgende factuur. Zet ‘Vast’ aan om de rekening en btw-behandeling af te dwingen, en gebruik ‘Instructie’ voor uitzonderingen (bv. “servicekosten apart op 4110”)."),
-      rijen.length ? h("div", { class: "tabelrol" }, h("table", {}, h("thead", {}, h("tr", {}, ["Code", "Naam", "Soort", "Btw-nummer", "Standaardrekening", "Standaard btw", "Vast", "Instructie voor de AI", ""].map((t) => h("th", {}, t)))), h("tbody", {}, rijen))) : h("div", { class: "leeg" }, "Nog geen relaties. Ze ontstaan vanzelf bij het goedkeuren, of neem ze hieronder over uit Exact."),
+      h("p", { class: "uitleg" }, "Bij elke goedkeuring onthoudt het programma op welke rekening en met welke btw een relatie is geboekt; de AI gebruikt dat bij de volgende factuur. Met ‘Auto-akkoord’ worden documenten van een vertrouwde relatie zonder fout of waarschuwing direct goedgekeurd. Het IBAN wordt gebruikt om een gewijzigd rekeningnummer te signaleren. Zet ‘Vast’ aan om de rekening en btw-behandeling af te dwingen, en gebruik ‘Instructie’ voor uitzonderingen (bv. “servicekosten apart op 4110”)."),
+      rijen.length ? h("div", { class: "tabelrol" }, h("table", {}, h("thead", {}, h("tr", {}, ["Code", "Naam", "Soort", "Btw-nummer", "IBAN", "Standaardrekening", "Standaard btw", "Vast", "Auto-akkoord", "Instructie voor de AI", ""].map((t) => h("th", {}, t)))), h("tbody", {}, rijen))) : h("div", { class: "leeg" }, "Nog geen relaties. Ze ontstaan vanzelf bij het goedkeuren, of neem ze hieronder over uit Exact."),
     ),
     h(
       "div",

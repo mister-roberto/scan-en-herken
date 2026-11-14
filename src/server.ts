@@ -1,5 +1,6 @@
 import express from "express";
 import multer from "multer";
+import { PDFDocument } from "pdf-lib";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -57,16 +58,60 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
     );
   }
 
+  function relatieVan(adminId: number, b: Boeking): Relatie | null {
+    const relaties = opslag.relaties(adminId);
+    const soort = b.soort === "inkoop" ? "crediteur" : "debiteur";
+    return relaties.find((r) => r.id === b.relatieId) ?? zoekRelatie({ naam: b.relatieNaam, btwNummer: b.relatieBtwNummer, adres: null, landcode: null, kvkNummer: null, iban: null }, soort, relaties);
+  }
   function controleer(doc: Document, b: Boeking, extra: Signalering[] = []): Signalering[] {
     const s = valideer(b, doc.extractie, opslag.profiel(doc.adminId), opslag.grootboek(doc.adminId), {
       dubbel: isDubbel(doc, b),
       vandaag: vandaag(),
       ubl: isXml(doc.mime) ? leesUbl(fs.readFileSync(doc.pad, "utf8")) : null,
+      relatie: relatieVan(doc.adminId, b),
+      eerdereBedragen: opslag
+        .documenten(doc.adminId)
+        .filter((d) => d.id !== doc.id && d.boeking && (d.status === "goedgekeurd" || d.status === "geexporteerd") && d.boeking.soort === b.soort && zelfdeNaam(d.boeking.relatieNaam, b.relatieNaam))
+        .map((d) => d.boeking!.totaalIncl),
     });
     return [...s, ...extra];
   }
 
   const statusNaControle = (s: Signalering[]) => (s.some((x) => x.niveau !== "info") ? "controle" : "gereed");
+
+  /** Neemt een aangeleverd bestand op in de wachtrij. Geeft het documentnummer of de reden van overslaan. */
+  function neemOp(adminId: number, naam: string, mime: string, inhoud: Buffer): { id?: number; overgeslagen?: string } {
+    if (!ONDERSTEUNDE_TYPES.includes(mime)) return { overgeslagen: "Bestandstype niet ondersteund (gebruik PDF, JPG, PNG, WEBP of een e-factuur in XML)." };
+    const hash = crypto.createHash("sha256").update(inhoud).digest("hex");
+    if (opslag.documenten(adminId).some((d) => d.hash === hash)) return { overgeslagen: "Dit bestand is al eerder aangeleverd." };
+    const pad = path.join(opslag.bestandenMap, `${hash}${path.extname(naam).toLowerCase().replace(/[^.a-z0-9]/g, "")}`);
+    fs.writeFileSync(pad, inhoud);
+    return { id: opslag.nieuwDocument(adminId, naam, mime, pad, hash) };
+  }
+
+  // --- Inleesmap: bestanden die in de map van een administratie worden gezet, komen vanzelf binnen ---
+  const TYPE_BIJ_EXTENSIE: Record<string, string> = { ".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".xml": "text/xml" };
+  const inleesmap = (adminId: number) => path.join(opslag.inleesMap, String(adminId));
+  function leesInleesmappen(): number {
+    let aantal = 0;
+    for (const a of opslag.administraties()) {
+      const map = inleesmap(a.id);
+      fs.mkdirSync(path.join(map, "verwerkt"), { recursive: true });
+      for (const naam of fs.readdirSync(map)) {
+        const bron = path.join(map, naam);
+        const stat = fs.statSync(bron);
+        // Even wachten tot een bestand volledig is weggeschreven (scanner, synchronisatie).
+        if (!stat.isFile() || naam.startsWith(".") || Date.now() - stat.mtimeMs < 2000) continue;
+        const r = neemOp(a.id, naam, TYPE_BIJ_EXTENSIE[path.extname(naam).toLowerCase()] ?? "", fs.readFileSync(bron));
+        const doel = path.join(map, r.id ? "verwerkt" : "overgeslagen");
+        fs.mkdirSync(doel, { recursive: true });
+        fs.renameSync(bron, path.join(doel, `${Date.now()}-${naam}`));
+        if (r.id) aantal++;
+      }
+    }
+    if (aantal) void verwerkWachtrij();
+    return aantal;
+  }
 
   // --- Verwerkingswachtrij: documenten worden één voor één op de achtergrond uitgelezen ---
   let bezig = false;
@@ -99,6 +144,11 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
           const { boeking, meldingen } = maakBoeking(extractie, opslag.profiel(doc.adminId), opslag.relaties(doc.adminId), opslag.grootboek(doc.adminId));
           const signaleringen = controleer({ ...doc, extractie }, boeking, meldingen);
           opslag.werkDocumentBij(doc.id, { extractie, boeking, aiVoorstel: boeking, gecorrigeerd: null, signaleringen, status: statusNaControle(signaleringen) });
+          // Vertrouwde relatie: een voorstel zonder fout of waarschuwing wordt direct goedgekeurd.
+          const relatie = relatieVan(doc.adminId, boeking);
+          if (relatie?.autoAkkoord && extractie.zekerheid === "hoog" && signaleringen.every((x) => x.niveau === "info") && keurGoed(opslag.document(doc.id))) {
+            opslag.werkDocumentBij(doc.id, { notitie: "Automatisch goedgekeurd: vertrouwde relatie, geen fouten of waarschuwingen." });
+          }
         } catch (e) {
           console.error(`Document ${doc.id}:`, e);
           opslag.werkDocumentBij(doc.id, { status: "fout", fout: vertaalApiFout(e) });
@@ -136,7 +186,8 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
   });
   app.get("/api/administraties/:id", (req, res) => {
     const a = id(req.params.id);
-    res.json({ id: a, profiel: opslag.profiel(a), grootboek: opslag.grootboek(a), btwcodes: opslag.btwcodes(a), relaties: opslag.relaties(a) });
+    fs.mkdirSync(inleesmap(a), { recursive: true });
+    res.json({ id: a, profiel: opslag.profiel(a), grootboek: opslag.grootboek(a), btwcodes: opslag.btwcodes(a), relaties: opslag.relaties(a), inleesmap: inleesmap(a) });
   });
   app.put("/api/administraties/:id/profiel", (req, res) => {
     const a = id(req.params.id);
@@ -185,6 +236,7 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
       standaardGrootboek: String(body.standaardGrootboek ?? bestaand?.standaardGrootboek ?? "").trim(),
       standaardBtw: isBehandeling(body.standaardBtw) ? body.standaardBtw : body.standaardBtw === "" ? ("" as const) : (bestaand?.standaardBtw ?? ("" as const)),
       vast: Boolean(body.vast ?? bestaand?.vast),
+      autoAkkoord: Boolean(body.autoAkkoord ?? bestaand?.autoAkkoord ?? false),
       instructie: String(body.instructie ?? bestaand?.instructie ?? "").trim(),
       nieuw: Boolean(body.nieuw ?? bestaand?.nieuw ?? false),
     };
@@ -237,6 +289,7 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
         datum: d.boeking?.datum ?? "",
         totaalIncl: d.boeking?.totaalIncl ?? null,
         efactuur: isXml(d.mime),
+        notitie: d.notitie,
         fouten: d.signaleringen.filter((s) => s.niveau === "fout").length,
         waarschuwingen: d.signaleringen.filter((s) => s.niveau === "waarschuwing").length,
       })),
@@ -245,24 +298,11 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
   app.post("/api/administraties/:id/documenten", upload.array("bestanden"), (req, res) => {
     const a = id(req.params.id);
     opslag.profiel(a);
-    const bestaand = new Set(opslag.documenten(a).map((d) => d.hash));
     const resultaat: { bestandsnaam: string; id?: number; overgeslagen?: string }[] = [];
     for (const f of (req.files as Express.Multer.File[]) ?? []) {
       // Browsers sturen bestandsnamen als latin1; zet terug naar UTF-8.
       const naam = Buffer.from(f.originalname, "latin1").toString("utf8");
-      if (!ONDERSTEUNDE_TYPES.includes(f.mimetype)) {
-        resultaat.push({ bestandsnaam: naam, overgeslagen: "Bestandstype niet ondersteund (gebruik PDF, JPG, PNG, WEBP of een e-factuur in XML)." });
-        continue;
-      }
-      const hash = crypto.createHash("sha256").update(f.buffer).digest("hex");
-      if (bestaand.has(hash)) {
-        resultaat.push({ bestandsnaam: naam, overgeslagen: "Dit bestand is al eerder aangeleverd." });
-        continue;
-      }
-      bestaand.add(hash);
-      const pad = path.join(opslag.bestandenMap, `${hash}${path.extname(naam).toLowerCase().replace(/[^.a-z0-9]/g, "")}`);
-      fs.writeFileSync(pad, f.buffer);
-      resultaat.push({ bestandsnaam: naam, id: opslag.nieuwDocument(a, naam, f.mimetype, pad, hash) });
+      resultaat.push({ bestandsnaam: naam, ...neemOp(a, naam, f.mimetype, f.buffer) });
     }
     void verwerkWachtrij();
     res.json(resultaat);
@@ -321,7 +361,7 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
     if (doc.status === "wachtrij" || doc.status === "bezig") throw new Ongeldig("Dit document wordt nog uitgelezen.");
     const boeking = leesBoeking(req.body, doc);
     const signaleringen = controleer(doc, boeking);
-    opslag.werkDocumentBij(doc.id, { boeking, signaleringen, status: statusNaControle(signaleringen), fout: "" });
+    opslag.werkDocumentBij(doc.id, { boeking, signaleringen, status: doc.status === "wacht" ? "wacht" : statusNaControle(signaleringen), fout: "" });
     res.json(uitvoer(opslag.document(doc.id)));
   });
 
@@ -359,8 +399,14 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
         instructie: "",
         nieuw: true,
       });
-    } else if (!relatie.vast) {
-      relatie = opslag.bewaarRelatie({ ...relatie, standaardGrootboek: grootste.grootboek, standaardBtw: grootste.btw });
+    } else {
+      // Een nog onbekend rekeningnummer wordt vastgelegd; een afwijkend nummer nooit stilzwijgend overschreven.
+      const iban = boeking.soort === "inkoop" ? (doc.extractie?.afzender.iban ?? "") : "";
+      relatie = opslag.bewaarRelatie({
+        ...relatie,
+        iban: relatie.iban || iban,
+        ...(relatie.vast ? {} : { standaardGrootboek: grootste.grootboek, standaardBtw: grootste.btw }),
+      });
     }
     // Correcties op het AI-voorstel worden leerpunten voor volgende documenten van deze relatie.
     const correcties = doc.aiVoorstel ? verschillen(doc.aiVoorstel, boeking, opslag.grootboek(doc.adminId)) : [];
@@ -420,6 +466,54 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
     opslag.verwijderDocument(doc.id);
     fs.rmSync(doc.pad, { force: true });
     res.json({ ok: true });
+  });
+
+  // --- Opvolging: notitie en in de wacht zetten ---
+  app.put("/api/documenten/:id/notitie", (req, res) => {
+    const doc = opslag.document(id(req.params.id));
+    opslag.werkDocumentBij(doc.id, { notitie: String(req.body?.notitie ?? "").trim().slice(0, 2000) });
+    res.json(uitvoer(opslag.document(doc.id)));
+  });
+  app.post("/api/documenten/:id/wacht", (req, res) => {
+    const doc = opslag.document(id(req.params.id));
+    if (!doc.boeking) throw new Ongeldig("Dit document heeft nog geen boeking.");
+    if (doc.status === "goedgekeurd" || doc.status === "geexporteerd") throw new Ongeldig("Dit document is al goedgekeurd.");
+    const notitie = String(req.body?.notitie ?? doc.notitie).trim().slice(0, 2000);
+    if (!notitie) throw new Ongeldig("Noteer waarop wordt gewacht, zodat een collega weet waarom dit document openstaat.");
+    opslag.werkDocumentBij(doc.id, { status: "wacht", notitie });
+    res.json(uitvoer(opslag.document(doc.id)));
+  });
+
+  // --- Splitsen van een pdf die meer dan één factuur bevat ---
+  app.post("/api/documenten/:id/splitsen", async (req, res) => {
+    const doc = opslag.document(id(req.params.id));
+    if (doc.mime !== "application/pdf") throw new Ongeldig("Alleen een pdf kan worden gesplitst.");
+    if (doc.status === "goedgekeurd" || doc.status === "geexporteerd") throw new Ongeldig("Dit document is al goedgekeurd.");
+    const bron = await PDFDocument.load(fs.readFileSync(doc.pad), { ignoreEncryption: true });
+    const paginas = bron.getPageCount();
+    const delen = String(req.body?.delen ?? "")
+      .split(",")
+      .map((d) => d.trim())
+      .filter(Boolean)
+      .map((d) => {
+        const [van, tot = van] = d.split("-").map((n) => Number(n.trim()));
+        if (!Number.isInteger(van) || !Number.isInteger(tot) || van! < 1 || tot! < van! || tot! > paginas) throw new Ongeldig(`Ongeldig paginabereik "${d}". Het bestand heeft ${paginas} pagina's.`);
+        return [van!, tot!] as const;
+      });
+    if (delen.length < 2) throw new Ongeldig("Geef minstens twee delen op, bv. 1-2, 3.");
+    const stam = doc.bestandsnaam.replace(/\.pdf$/i, "");
+    const nieuw: number[] = [];
+    for (const [i, [van, tot]] of delen.entries()) {
+      const deel = await PDFDocument.create();
+      const indexen = Array.from({ length: tot - van + 1 }, (_, k) => van - 1 + k);
+      for (const pagina of await deel.copyPages(bron, indexen)) deel.addPage(pagina);
+      const r = neemOp(doc.adminId, `${stam}-deel${i + 1}.pdf`, "application/pdf", Buffer.from(await deel.save()));
+      if (r.id) nieuw.push(r.id);
+    }
+    opslag.verwijderDocument(doc.id);
+    fs.rmSync(doc.pad, { force: true });
+    void verwerkWachtrij();
+    res.json({ documenten: nieuw });
   });
 
   // --- Feedback: wat de AI van de boekhouder moet leren ---
@@ -515,6 +609,15 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
   });
 
   void verwerkWachtrij();
+  // De inleesmappen worden regelmatig nagekeken; de timer houdt het programma niet in leven.
+  setInterval(() => {
+    try {
+      leesInleesmappen();
+    } catch (e) {
+      console.error("Inleesmap:", e);
+    }
+  }, 10_000).unref();
+  app.locals.leesInleesmappen = leesInleesmappen;
   return app;
 }
 
