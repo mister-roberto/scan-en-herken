@@ -45,7 +45,7 @@ Open daarna http://localhost:3000.
 | `SCAN_MODEL` | AI-model | `claude-opus-5-5` |
 | `SCAN_DATA` | Map voor database en bestanden | `./data` |
 | `PORT` / `HOST` | Adres van de webserver | `3000` / `127.0.0.1` |
-| `SCAN_WACHTWOORD` | Wachtwoord voor de webapplicatie (verplicht zodra `HOST` niet de eigen computer is) | – |
+| `SCAN_BEHEERDER` | Eerste beheerder vooraf aanmaken als `e-mailadres:wachtwoord` (nodig als `HOST` niet de eigen computer is en er nog geen gebruikers zijn) | – |
 | `SCAN_DEMO=1` | Demomodus zonder AI | uit |
 
 ## Eerste inrichting van een administratie
@@ -91,6 +91,18 @@ Naast PDF's en foto's kunt u e-facturen in XML aanleveren (UBL 2.1, zoals SI-UBL
 - **Ctrl+Enter** keurt het geopende document goed en opent het volgende.
 - **Bestaande relatie kiezen** bij een document: btw-nummer en land worden overgenomen.
 - Bij elk document staat wanneer het is goedgekeurd en geëxporteerd.
+
+## Gebruikers en meerdere administraties
+
+Iedere medewerker meldt zich aan met een eigen e-mailadres en wachtwoord. Bij het eerste gebruik maakt u in de browser de eerste beheerder aan.
+
+- **Rollen**: een *beheerder* heeft toegang tot alle administraties, beheert gebruikers en maakt administraties aan. Een *medewerker* werkt in de administraties waartoe toegang is gegeven (alle, of een selectie).
+- **Gebruikers** (alleen beheerder): toevoegen met een tijdelijk wachtwoord dat bij de eerste aanmelding moet worden gewijzigd, rol en toegang aanpassen, uitzetten, wachtwoord opnieuw instellen.
+- **Alle administraties**: de werkvoorraad per administratie (te beoordelen, in de wacht, klaar voor export); klik om naar een administratie te gaan.
+- **Logboek**: wie wat wanneer heeft gedaan. Een medewerker ziet alleen de eigen administraties, een beheerder alles, inclusief aanmeldingen. Bij elk document staat wie het heeft goedgekeurd en de geschiedenis.
+- **Beveiliging**: wachtwoorden worden alleen als scrypt-hash bewaard, minstens 10 tekens; na vijf mislukte pogingen is een account een kwartier geblokkeerd; een sessie verloopt na twaalf uur zonder activiteit; toegang per administratie wordt op de server afgedwongen.
+
+Nog niet aanwezig: inloggen voor klanten, tweestapsverificatie, een vergeten-wachtwoordmail (een beheerder stelt het wachtwoord opnieuw in) en koppeling met een centrale inlog zoals Microsoft 365.
 
 ## Functies naar aanleiding van de marktvergelijking
 
@@ -157,7 +169,7 @@ De interface volgt de huisstijl van Beuk Accountants & Belastingadviseurs (kleur
 
 - Documenten worden voor het uitlezen naar de API van Anthropic gestuurd. Regel dit in de verwerkersafspraken met klanten.
 - De database en de bestanden staan lokaal in de datamap.
-- De server luistert standaard alleen op de eigen computer. Wilt u hem via het netwerk bereikbaar maken (`HOST=0.0.0.0`), dan is `SCAN_WACHTWOORD` verplicht; de browser vraagt dan om dat wachtwoord (de gebruikersnaam is vrij). Dit is één gedeeld wachtwoord, geen gebruikersbeheer, en het beschermt alleen goed achter een https-verbinding.
+- De server luistert standaard alleen op de eigen computer. Voor gebruik door collega's via het netwerk zet u `HOST=0.0.0.0`; dat kan pas als er een beheerder is. Zet er een https-verbinding voor (bijvoorbeeld een reverse proxy): zonder https gaan wachtwoorden en sessies onversleuteld over het netwerk.
 
 ## Ontwikkelen
 

@@ -42,6 +42,9 @@ async function api(pad, methode = "GET", body) {
     body: body instanceof FormData ? body : body === undefined ? undefined : JSON.stringify(body),
   }).finally(() => lader(-1));
   const data = await r.json().catch(() => ({}));
+  // Sessie verlopen of nog niet aangemeld: terug naar het aanmeldscherm.
+  if (r.status === 401 && !pad.startsWith("/auth/")) toonAanmelden(data.setup ? "setup" : "aanmelden");
+  if (r.status === 403 && data.moetWijzigen) toonAanmelden("wijzigen");
   if (!r.ok) throw Object.assign(new Error(data.fout || `Fout ${r.status}`), { data, status: r.status });
   return data;
 }
@@ -117,7 +120,7 @@ $("#nieuweAdmin").addEventListener(
 );
 
 // ---------- Routering ----------
-const paginas = { start: paginaStart, documenten: paginaDocumenten, document: paginaDocument, feedback: paginaFeedback, btw: paginaBtw, export: paginaExport, profiel: paginaProfiel, grootboek: paginaGrootboek, btwcodes: paginaBtwcodes, relaties: paginaRelaties };
+const paginas = { overzicht: paginaOverzicht, gebruikers: paginaGebruikers, logboek: paginaLogboek, account: paginaAccount, start: paginaStart, documenten: paginaDocumenten, document: paginaDocument, feedback: paginaFeedback, btw: paginaBtw, export: paginaExport, profiel: paginaProfiel, grootboek: paginaGrootboek, btwcodes: paginaBtwcodes, relaties: paginaRelaties };
 
 let vorigeRoute = "";
 /** Niet-opgeslagen wijzigingen op een instellingenpagina. */
@@ -141,9 +144,14 @@ async function toon() {
   }
   werkTellerBij().catch(() => {});
   document.querySelectorAll("#menu a").forEach((a) => a.classList.toggle("actief", a.getAttribute("href") === `#/${naam === "document" ? "documenten" : naam}`));
-  if (!adminId) {
-    vul(inhoud, 
-      h("div", { class: "kaart leeg" }, h("h1", {}, "Welkom bij Scan & Herken"), h("p", {}, "Maak eerst een administratie aan voor het bedrijf waarvan u facturen en bonnen wilt verwerken."), h("button", { class: "knop hoofd", onclick: () => $("#nieuweAdmin").click() }, "Administratie aanmaken")),
+  // Pagina's van het kantoor werken ook zonder gekozen administratie.
+  const kantoor = ["overzicht", "gebruikers", "logboek", "account"].includes(naam);
+  if (!adminId && !kantoor) {
+    vul(
+      inhoud,
+      ik?.rol === "beheerder"
+        ? h("div", { class: "kaart leeg" }, h("h1", {}, "Welkom bij Scan & Herken"), h("p", {}, "Maak eerst een administratie aan voor het bedrijf waarvan u facturen en bonnen wilt verwerken."), h("button", { class: "knop hoofd", onclick: () => $("#nieuweAdmin").click() }, "Administratie aanmaken"))
+        : h("div", { class: "kaart leeg" }, h("h1", {}, "Nog geen administraties"), h("p", {}, "U heeft nog geen toegang tot een administratie. Vraag een beheerder om u toegang te geven.")),
     );
     return;
   }
@@ -529,7 +537,7 @@ async function paginaDocument(arg) {
       veld("Omschrijving", tekst("omschrijving"), "breed"),
     ),
     betaald ? h("p", { class: "uitleg", style: "margin:10px 0 0" }, `Volgens het document al betaald per ${betaald}. De boeking loopt via de ${b.soort === "inkoop" ? "crediteur" : "debiteur"}; de betaling wordt in Exact afgeletterd met de bank of kas.`) : null,
-    doc.goedgekeurdOp ? h("p", { class: "uitleg", style: "margin:10px 0 0" }, `Goedgekeurd op ${new Date(doc.goedgekeurdOp).toLocaleString("nl-NL")}${doc.geexporteerdOp ? ` · geëxporteerd op ${new Date(doc.geexporteerdOp).toLocaleString("nl-NL")}` : ""}`) : null,
+    doc.goedgekeurdOp ? h("p", { class: "uitleg", style: "margin:10px 0 0" }, `Goedgekeurd op ${new Date(doc.goedgekeurdOp).toLocaleString("nl-NL")}${doc.goedgekeurdDoor ? ` door ${doc.goedgekeurdDoor}` : ""}${doc.geexporteerdOp ? ` · geëxporteerd op ${new Date(doc.geexporteerdOp).toLocaleString("nl-NL")}` : ""}`) : null,
   );
   const regelsKaart = h(
     "div",
@@ -637,7 +645,7 @@ async function paginaDocument(arg) {
   tekenUitkomst();
   vul(inhoud, 
     kop(`${b.relatieNaam || doc.bestandsnaam}`, doc.bestandsnaam, kopKnoppen),
-    h("div", { class: "splits" }, voorbeeld, h("div", {}, formulier, regelsKaart, h("div", { class: "kaart" }, signalenVak), doc.factuureisen ? h("div", { class: "kaart" }, eisenVak) : null, h("div", { class: "kaart" }, journaalVak), h("div", { class: "kaart" }, feedbackVak), opvolging, acties)),
+    h("div", { class: "splits" }, voorbeeld, h("div", {}, formulier, regelsKaart, h("div", { class: "kaart" }, signalenVak), doc.factuureisen ? h("div", { class: "kaart" }, eisenVak) : null, h("div", { class: "kaart" }, journaalVak), h("div", { class: "kaart" }, feedbackVak), opvolging, (doc.geschiedenis ?? []).length ? h("div", { class: "kaart" }, h("h2", {}, "Geschiedenis"), h("table", {}, h("tbody", {}, doc.geschiedenis.map((r) => h("tr", {}, h("td", { class: "zacht", style: "white-space:nowrap" }, new Date(r.tijd).toLocaleString("nl-NL")), h("td", {}, r.gebruiker), h("td", {}, r.actie)))))) : null, acties)),
   );
 }
 
@@ -958,16 +966,237 @@ async function paginaRelaties() {
 }
 
 // ---------- Start ----------
-(async () => {
+// ---------- Alle administraties ----------
+async function paginaOverzicht() {
+  const rijen = await api("/overzicht");
+  const kies = async (a) => {
+    adminId = a.id;
+    localStorage.setItem("adminId", adminId);
+    $("#adminKeuze").value = adminId;
+    await laadAdmin();
+    location.hash = "#/start";
+  };
+  const som = (sleutel) => rijen.reduce((t, r) => t + r[sleutel], 0);
+  const tegel = (groot, klein) => h("div", { class: "tegel" }, h("div", { class: "getal-groot" }, groot), h("div", { class: "zacht" }, klein));
+  vul(
+    inhoud,
+    h("div", { class: "paginakop" }, h("div", {}, h("div", { class: "kicker" }, "Kantoor"), h("h1", {}, "Alle administraties"), h("div", { class: "zacht" }, "De werkvoorraad per administratie waar u toegang toe heeft"))),
+    h("div", { class: "tegels", style: "margin-bottom:16px" }, tegel(String(rijen.length), "administraties"), tegel(String(som("open")), "documenten te beoordelen"), tegel(String(som("wacht")), "in de wacht"), tegel(String(som("goedgekeurd")), "goedgekeurd, klaar voor export")),
+    h(
+      "div",
+      { class: "kaart" },
+      rijen.length
+        ? h(
+            "div",
+            { class: "tabelrol" },
+            h(
+              "table",
+              { class: "lijst" },
+              h("thead", {}, h("tr", {}, h("th", {}, "Administratie"), ["Te beoordelen", "In de wacht", "Klaar voor export", "Geëxporteerd"].map((t) => h("th", { class: "getal" }, t)), h("th", {}, "Laatst aangeleverd"))),
+              h(
+                "tbody",
+                {},
+                [...rijen]
+                  .sort((x, y) => y.open - x.open || x.naam.localeCompare(y.naam))
+                  .map((r) =>
+                    h(
+                      "tr",
+                      { class: "klikbaar", onclick: () => kies(r) },
+                      h("td", {}, h("b", {}, r.naam), r.bezig ? h("span", { class: "label" }, `${r.bezig} wordt uitgelezen`) : null),
+                      h("td", { class: "getal" }, r.open ? h("span", { class: "chip controle" }, r.open) : "0"),
+                      h("td", { class: "getal" }, r.wacht || "0"),
+                      h("td", { class: "getal" }, r.goedgekeurd || "0"),
+                      h("td", { class: "getal" }, r.geexporteerd || "0"),
+                      h("td", { class: "zacht" }, r.laatst ? new Date(r.laatst).toLocaleDateString("nl-NL") : "–"),
+                    ),
+                  ),
+              ),
+            ),
+          )
+        : h("div", { class: "leeg" }, ik?.rol === "beheerder" ? "Nog geen administraties. Maak er links een aan." : "U heeft nog geen toegang tot een administratie."),
+    ),
+  );
+}
+
+// ---------- Gebruikers (beheerder) ----------
+async function paginaGebruikers() {
+  const [gebruikers, admins] = await Promise.all([api("/gebruikers"), api("/administraties")]);
+  const wijzig = probeer(async (g, velden) => {
+    Object.assign(g, await api(`/gebruikers/${g.id}`, "PUT", velden));
+    meld("Opgeslagen");
+    toon();
+  });
+  const toegang = (g) => {
+    if (g.rol === "beheerder") return h("span", { class: "zacht" }, "alle (beheerder)");
+    const alle = h("label", { style: "display:flex;gap:6px;align-items:center" }, h("input", { type: "checkbox", checked: g.administraties === "alle", onchange: (e) => wijzig(g, { administraties: e.target.checked ? "alle" : [] }) }), "Alle administraties");
+    if (g.administraties === "alle") return alle;
+    return h("div", {}, alle, admins.map((a) => h("label", { style: "display:flex;gap:6px;align-items:center" }, h("input", { type: "checkbox", checked: g.administraties.includes(a.id), onchange: (e) => wijzig(g, { administraties: e.target.checked ? [...g.administraties, a.id] : g.administraties.filter((x) => x !== a.id) }) }), a.naam)));
+  };
+  const rol = (g) => {
+    const s = h("select", { style: "width:auto", onchange: (e) => wijzig(g, { rol: e.target.value }) }, h("option", { value: "medewerker" }, "Medewerker"), h("option", { value: "beheerder" }, "Beheerder"));
+    s.value = g.rol;
+    return s;
+  };
+  const nieuw = { naam: "", email: "", rol: "medewerker", wachtwoord: "", administraties: "alle" };
+  const veldNieuw = (sleutel, attrs = {}) => h("input", { oninput: (e) => (nieuw[sleutel] = e.target.value), ...attrs });
+  const rolNieuw = h("select", { onchange: (e) => (nieuw.rol = e.target.value) }, h("option", { value: "medewerker" }, "Medewerker"), h("option", { value: "beheerder" }, "Beheerder"));
+  vul(
+    inhoud,
+    h("div", { class: "paginakop" }, h("div", {}, h("div", { class: "kicker" }, "Kantoor"), h("h1", {}, "Gebruikers"), h("div", { class: "zacht" }, "Wie mag aanmelden, met welke rol en bij welke administraties"))),
+    h(
+      "div",
+      { class: "kaart" },
+      h(
+        "div",
+        { class: "tabelrol" },
+        h(
+          "table",
+          {},
+          h("thead", {}, h("tr", {}, ["Naam", "E-mailadres", "Rol", "Toegang tot", "Actief", ""].map((t) => h("th", {}, t)))),
+          h(
+            "tbody",
+            {},
+            gebruikers.map((g) =>
+              h(
+                "tr",
+                { style: g.actief ? "" : "opacity:.55" },
+                h("td", {}, h("b", {}, g.naam), g.id === ik.id ? h("span", { class: "label leert" }, "u") : null, g.moetWijzigen ? h("span", { class: "label letop" }, "tijdelijk wachtwoord") : null),
+                h("td", {}, g.email),
+                h("td", {}, rol(g)),
+                h("td", {}, toegang(g)),
+                h("td", {}, h("input", { type: "checkbox", checked: g.actief, title: "Uitgezette gebruikers kunnen niet meer aanmelden", onchange: (e) => wijzig(g, { actief: e.target.checked }) })),
+                h("td", {}, h("button", { class: "knop klein", onclick: probeer(async () => { const w = prompt(`Nieuw tijdelijk wachtwoord voor ${g.naam} (minstens 10 tekens). De gebruiker moet het bij de volgende aanmelding wijzigen.`); if (w) await wijzig(g, { wachtwoord: w }); }) }, "Wachtwoord instellen")),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+    h(
+      "div",
+      { class: "kaart" },
+      h("h2", {}, "Gebruiker toevoegen"),
+      h("div", { class: "rooster" }, veld("Naam", veldNieuw("naam")), veld("E-mailadres (inlognaam)", veldNieuw("email", { type: "email", autocomplete: "off" })), veld("Rol", rolNieuw), veld("Tijdelijk wachtwoord (minstens 10 tekens)", veldNieuw("wachtwoord", { type: "text", autocomplete: "off" }))),
+      h("p", { class: "uitleg", style: "margin:10px 0" }, "De nieuwe gebruiker krijgt toegang tot alle administraties; u kunt dat daarna in de tabel beperken. Geef het tijdelijke wachtwoord persoonlijk door; bij de eerste aanmelding moet het worden gewijzigd."),
+      h("button", { class: "knop hoofd", onclick: probeer(async () => { await api("/gebruikers", "POST", nieuw); meld("Gebruiker toegevoegd"); toon(); }) }, "Toevoegen"),
+    ),
+    h("div", { class: "kaart uitleg" }, h("h2", {}, "Rollen"), h("p", {}, h("b", {}, "Beheerder: "), "alle administraties, gebruikers beheren en administraties aanmaken."), h("p", {}, h("b", {}, "Medewerker: "), "documenten verwerken, instellingen en export van de administraties waartoe toegang is gegeven.")),
+  );
+}
+
+// ---------- Logboek ----------
+async function paginaLogboek() {
+  const regels = await api("/logboek");
+  let zoek = "";
+  const body = h("tbody", {});
+  const teken = () =>
+    vul(
+      body,
+      regels
+        .filter((r) => !zoek || [r.gebruiker, r.actie, r.administratie, r.detail].join(" ").toLowerCase().includes(zoek.toLowerCase()))
+        .map((r) => h("tr", {}, h("td", { class: "zacht", style: "white-space:nowrap" }, new Date(r.tijd).toLocaleString("nl-NL")), h("td", {}, r.gebruiker), h("td", {}, r.actie), h("td", {}, r.administratie), h("td", { class: "zacht" }, r.documentId ? h("a", { href: `#/document/${r.documentId}` }, r.detail || `document ${r.documentId}`) : r.detail))),
+    );
+  teken();
+  vul(
+    inhoud,
+    h("div", { class: "paginakop" }, h("div", {}, h("div", { class: "kicker" }, "Kantoor"), h("h1", {}, "Logboek"), h("div", { class: "zacht" }, ik?.rol === "beheerder" ? "Wie wat heeft gedaan, in alle administraties" : "Wie wat heeft gedaan in uw administraties"))),
+    h("div", { class: "kaart" }, h("input", { type: "search", placeholder: "Zoek op gebruiker, handeling of administratie", style: "max-width:340px;margin-bottom:12px", oninput: (e) => ((zoek = e.target.value), teken()) }), regels.length ? h("div", { class: "tabelrol" }, h("table", {}, h("thead", {}, h("tr", {}, ["Tijdstip", "Gebruiker", "Handeling", "Administratie", "Betreft"].map((t) => h("th", {}, t)))), body)) : h("div", { class: "leeg" }, "Nog niets vastgelegd."), h("p", { class: "uitleg", style: "margin:10px 0 0" }, "De laatste 500 handelingen. Het logboek kan niet worden gewijzigd of gewist vanuit het programma.")),
+  );
+}
+
+// ---------- Mijn account ----------
+async function paginaAccount() {
+  const w = { huidig: "", nieuw: "", herhaal: "" };
+  const veldW = (sleutel, auto) => h("input", { type: "password", autocomplete: auto, oninput: (e) => (w[sleutel] = e.target.value) });
+  vul(
+    inhoud,
+    h("div", { class: "paginakop" }, h("div", {}, h("div", { class: "kicker" }, "Kantoor"), h("h1", {}, "Mijn account"), h("div", { class: "zacht" }, `${ik.naam} · ${ik.email} · ${ik.rol}`))),
+    h(
+      "div",
+      { class: "kaart", style: "max-width:520px" },
+      h("h2", {}, "Wachtwoord wijzigen"),
+      h("div", { style: "display:flex;flex-direction:column;gap:12px" }, veld("Huidig wachtwoord", veldW("huidig", "current-password")), veld("Nieuw wachtwoord (minstens 10 tekens)", veldW("nieuw", "new-password")), veld("Nieuw wachtwoord nogmaals", veldW("herhaal", "new-password"))),
+      h("button", { class: "knop hoofd", style: "margin-top:14px", onclick: probeer(async () => { if (w.nieuw !== w.herhaal) return meld("De twee nieuwe wachtwoorden zijn niet gelijk.", true); await api("/auth/wachtwoord", "POST", w); meld("Wachtwoord gewijzigd"); toon(); }) }, "Wachtwoord wijzigen"),
+    ),
+  );
+}
+
+// ---------- Aanmelden ----------
+let ik = null;
+function toonAanmelden(soort) {
+  clearTimeout(verversTimer);
+  if (document.body.classList.contains("aanmelden") && $("#aanmeldvak").dataset.soort === soort) return;
+  document.body.classList.add("aanmelden");
+  const vak = $("#aanmeldvak");
+  vak.dataset.soort = soort;
+  const fout = h("div", { class: "foutregel", role: "alert" });
+  const invoer = (label, attrs) => veld(label, h("input", { required: true, ...attrs }));
+  const teksten = {
+    aanmelden: ["Aanmelden", "Meld u aan met uw e-mailadres en wachtwoord.", "Aanmelden"],
+    setup: ["Eerste gebruik", "Maak de eerste beheerder aan. Deze kan daarna collega's toevoegen.", "Beheerder aanmaken"],
+    wijzigen: ["Nieuw wachtwoord kiezen", "U heeft een tijdelijk wachtwoord. Kies nu een eigen wachtwoord van minstens 10 tekens.", "Wachtwoord opslaan"],
+  }[soort];
+  const velden = {
+    aanmelden: [invoer("E-mailadres", { name: "email", type: "email", autocomplete: "username", autofocus: true }), invoer("Wachtwoord", { name: "wachtwoord", type: "password", autocomplete: "current-password" })],
+    setup: [invoer("Uw naam", { name: "naam", autocomplete: "name", autofocus: true }), invoer("E-mailadres (inlognaam)", { name: "email", type: "email", autocomplete: "username" }), invoer("Wachtwoord (minstens 10 tekens)", { name: "wachtwoord", type: "password", autocomplete: "new-password", minlength: 10 })],
+    wijzigen: [invoer("Tijdelijk wachtwoord", { name: "huidig", type: "password", autocomplete: "current-password", autofocus: true }), invoer("Nieuw wachtwoord", { name: "nieuw", type: "password", autocomplete: "new-password", minlength: 10 }), invoer("Nieuw wachtwoord nogmaals", { name: "herhaal", type: "password", autocomplete: "new-password", minlength: 10 })],
+  }[soort];
+  const formulier = h(
+    "form",
+    {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        fout.textContent = "";
+        const d = Object.fromEntries(new FormData(formulier));
+        try {
+          if (soort === "wijzigen" && d.nieuw !== d.herhaal) throw new Error("De twee nieuwe wachtwoorden zijn niet gelijk.");
+          await api({ aanmelden: "/auth/aanmelden", setup: "/auth/setup", wijzigen: "/auth/wachtwoord" }[soort], "POST", d);
+          delete vak.dataset.soort;
+          await begin();
+        } catch (err) {
+          fout.textContent = err.message;
+        }
+      },
+    },
+    velden,
+    fout,
+    h("button", { class: "knop hoofd", type: "submit" }, teksten[2]),
+    soort === "wijzigen" ? h("button", { class: "knop", type: "button", onclick: afmelden }, "Afmelden") : null,
+  );
+  vul(vak, h("img", { src: "img/beuk.png", alt: "Beuk Accountants & Belastingadviseurs" }), h("div", { class: "kicker" }, "Scan & Herken"), h("h1", {}, teksten[0]), h("div", { class: "zacht" }, teksten[1]), formulier);
+  vak.querySelector("[autofocus]")?.focus();
+}
+async function afmelden() {
+  await api("/auth/afmelden", "POST").catch(() => {});
+  ik = null;
+  onopgeslagen = false;
+  toonAanmelden("aanmelden");
+}
+
+// ---------- Start van het programma ----------
+async function begin() {
+  try {
+    ik = await api("/auth/ik");
+  } catch (e) {
+    if (e.status === 401) return toonAanmelden(e.data.setup ? "setup" : "aanmelden");
+    return vul(inhoud, h("div", { class: "kaart leeg" }, `Kan de server niet bereiken: ${e.message}`));
+  }
+  if (ik.moetWijzigen) return toonAanmelden("wijzigen");
+  document.body.classList.remove("aanmelden");
   try {
     meta = await api("/meta");
     $("#model").textContent = `AI-model: ${meta.model}`;
-    await laadAdmins();
+    vul($("#wie"), ik.zonderAanmelden ? null : [h("b", {}, ik.naam), h("a", { href: "#/account" }, "Mijn account"), h("a", { onclick: afmelden }, "Afmelden")]);
+    $("#menuGebruikers").hidden = ik.rol !== "beheerder";
+    $("#nieuweAdmin").hidden = ik.rol !== "beheerder";
+    const lijst = await laadAdmins();
     await laadAdmin();
-    if (!location.hash) location.hash = "#/start";
+    // Met meer dan één administratie begint een medewerker bij het overzicht van de werkvoorraad.
+    if (!location.hash || location.hash === "#/") location.hash = lijst.length > 1 ? "#/overzicht" : "#/start";
     vasteHash = location.hash;
     toon();
   } catch (e) {
-    vul(inhoud, h("div", { class: "kaart leeg" }, `Kan de server niet bereiken: ${e.message}`));
+    if (e.status !== 401 && e.status !== 403) vul(inhoud, h("div", { class: "kaart leeg" }, `Kan de server niet bereiken: ${e.message}`));
   }
-})();
+}
+begin();

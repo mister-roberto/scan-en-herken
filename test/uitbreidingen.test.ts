@@ -51,20 +51,16 @@ test("btw-overzicht: rubrieken van de aangifte", () => {
   assert.equal(o.saldo, o.verschuldigd - o.voorbelasting);
 });
 
-test("e-factuur, in één keer goedkeuren, btw-overzicht en wachtwoord via de server", async () => {
+test("e-factuur, in één keer goedkeuren en btw-overzicht via de server", async () => {
   const map = fs.mkdtempSync(path.join(os.tmpdir(), "scan-"));
-  const server = maakApp(new Opslag(map), demoExtractor, true, "geheim").listen(0);
+  const server = maakApp(new Opslag(map), demoExtractor, { demo: true, auth: false }).listen(0);
   const basis = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const auth = { authorization: "Basic " + Buffer.from("wie:geheim").toString("base64") };
+  const auth = {};
   const json = async (pad: string, methode = "GET", body?: unknown) => {
-    const r = await fetch(`${basis}/api${pad}`, { method: methode, headers: { ...auth, "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+    const r = await fetch(`${basis}/api${pad}`, { method: methode, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
     return { status: r.status, data: (await r.json()) as any };
   };
   try {
-    assert.equal((await fetch(`${basis}/api/meta`)).status, 401);
-    assert.equal((await fetch(`${basis}/`, { headers: { authorization: "Basic " + Buffer.from("wie:fout").toString("base64") } })).status, 401);
-    assert.equal((await fetch(`${basis}/`, { headers: auth })).status, 200);
-
     const { data: admin } = await json("/administraties", "POST", { naam: "Bakkerij Jansen B.V." });
     const form = new FormData();
     form.append("bestanden", new Blob([efactuur], { type: "text/xml" }), "efactuur-meelgroothandel.xml");

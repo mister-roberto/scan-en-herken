@@ -11,6 +11,7 @@ import { beoordeelFactuur } from "./factuureisen.ts";
 import { isGeldigeDatum, maakBoeking, maakJournaalpost, verschillen, zelfdeNaam, zoekRelatie } from "./boeking.ts";
 import { isXml, leesUbl } from "./ubl.ts";
 import { NietGevonden, Opslag } from "./db.ts";
+import { MIN_WACHTWOORD, geldigEmail, hashWachtwoord, klopt, magAdministratie, nieuwToken, publiek, tokenHash, type Gebruiker } from "./auth.ts";
 import { btwSleutel, controleerExport, exactCsv, exactRegels, exactXml, journaalCsv } from "./exact.ts";
 import { MODEL, ONDERSTEUNDE_TYPES, demoExtractor, extraheerMetClaude, vertaalApiFout, type Extractor } from "./extract.ts";
 import { heeftFouten, valideer } from "./validatie.ts";
@@ -24,20 +25,311 @@ function vandaag(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wachtwoord = "") {
+class Verboden extends Error {}
+
+export interface AppOpties {
+  demo?: boolean;
+  /** Aanmelden verplicht. Staat alleen uit in geautomatiseerde tests van de boekingslogica. */
+  auth?: boolean;
+}
+
+const SESSIEDUUR = 12 * 60 * 60 * 1000;
+const COOKIE = "scan_sessie";
+const SYSTEEM: Gebruiker = { id: 0, naam: "Systeem", email: "", rol: "beheerder", actief: true, administraties: "alle", wachtwoordHash: "", moetWijzigen: false };
+
+/** Welke handelingen in het logboek komen: methode, pad en omschrijving. */
+const ACTIES: [string, RegExp, string][] = [
+  ["POST", /^\/api\/documenten\/\d+\/goedkeuren$/, "Goedgekeurd"],
+  ["POST", /^\/api\/documenten\/\d+\/heropenen$/, "Heropend"],
+  ["POST", /^\/api\/documenten\/\d+\/wacht$/, "In de wacht gezet"],
+  ["POST", /^\/api\/documenten\/\d+\/opnieuw$/, "Opnieuw laten uitlezen"],
+  ["POST", /^\/api\/documenten\/\d+\/splitsen$/, "Gesplitst"],
+  ["POST", /^\/api\/documenten\/\d+\/feedback$/, "Feedback gegeven"],
+  ["PUT", /^\/api\/documenten\/\d+\/boeking$/, "Boeking gewijzigd"],
+  ["PUT", /^\/api\/documenten\/\d+\/notitie$/, "Notitie gewijzigd"],
+  ["DELETE", /^\/api\/documenten\/\d+$/, "Document verwijderd"],
+  ["POST", /^\/api\/administraties$/, "Administratie aangemaakt"],
+  ["POST", /^\/api\/administraties\/\d+\/documenten$/, "Documenten aangeleverd"],
+  ["POST", /^\/api\/administraties\/\d+\/export$/, "Exportbestand gemaakt"],
+  ["POST", /^\/api\/administraties\/\d+\/goedkeuren-zonder-signalen$/, "In één keer goedgekeurd"],
+  ["PUT", /^\/api\/administraties\/\d+\/profiel$/, "Bedrijfsprofiel gewijzigd"],
+  ["PUT", /^\/api\/administraties\/\d+\/grootboek$/, "Rekeningschema gewijzigd"],
+  ["PUT", /^\/api\/administraties\/\d+\/btwcodes$/, "Btw-codes gewijzigd"],
+  ["POST", /^\/api\/administraties\/\d+\/relaties$/, "Relatie toegevoegd"],
+  ["POST", /^\/api\/administraties\/\d+\/relaties\/import$/, "Relaties overgenomen"],
+  ["PUT", /^\/api\/relaties\/\d+$/, "Relatie gewijzigd"],
+  ["DELETE", /^\/api\/relaties\/\d+$/, "Relatie verwijderd"],
+  ["PUT", /^\/api\/feedback\/\d+$/, "Leerpunt gewijzigd"],
+  ["DELETE", /^\/api\/feedback\/\d+$/, "Leerpunt verwijderd"],
+  ["POST", /^\/api\/gebruikers$/, "Gebruiker toegevoegd"],
+  ["PUT", /^\/api\/gebruikers\/\d+$/, "Gebruiker gewijzigd"],
+];
+/** Handelingen die bij elke toetsaanslag terugkomen; hooguit eens per tien minuten vastgelegd. */
+const STIL = new Set(["Boeking gewijzigd", "Notitie gewijzigd", "Relatie gewijzigd", "Leerpunt gewijzigd"]);
+
+export function maakApp(opslag: Opslag, extractor: Extractor, opties: AppOpties = {}) {
+  const demo = opties.demo ?? false;
+  const metAuth = opties.auth ?? true;
   const app = express();
-  // Met SCAN_WACHTWOORD ingesteld vraagt de browser om een wachtwoord (gebruikersnaam is vrij).
-  if (wachtwoord) {
-    const verwacht = crypto.createHash("sha256").update(wachtwoord).digest();
-    app.use((req, res, next) => {
-      const [soort, code] = (req.headers.authorization ?? "").split(" ");
-      const gegeven = soort === "Basic" && code ? Buffer.from(code, "base64").toString("utf8").split(":").slice(1).join(":") : "";
-      if (crypto.timingSafeEqual(crypto.createHash("sha256").update(gegeven).digest(), verwacht)) return next();
-      res.setHeader("WWW-Authenticate", 'Basic realm="Scan & Herken", charset="UTF-8"').status(401).send("Wachtwoord vereist");
-    });
-  }
   app.use(express.json({ limit: "2mb" }));
   app.use(express.static(path.join(hier, "..", "public")));
+
+  // ---------- Aanmelden, sessies en toegang ----------
+  type Verzoek = express.Request & { gebruiker?: Gebruiker; sessieHash?: string };
+  const wie = (req: express.Request): Gebruiker => (req as Verzoek).gebruiker ?? SYSTEEM;
+
+  function sessieVan(req: express.Request): { gebruiker: Gebruiker; hash: string } | null {
+    const token = /(?:^|;\s*)scan_sessie=([^;]+)/.exec(req.headers.cookie ?? "")?.[1];
+    if (!token) return null;
+    const hash = tokenHash(token);
+    const sessie = opslag.sessie(hash);
+    if (!sessie || sessie.verloopt < Date.now()) return null;
+    const gebruiker = opslag.gebruiker(sessie.gebruikerId);
+    if (!gebruiker || !gebruiker.actief) return null;
+    // De sessie loopt af na twaalf uur zonder activiteit.
+    if (sessie.verloopt - Date.now() < SESSIEDUUR - 60_000) opslag.verlengSessie(hash, Date.now() + SESSIEDUUR);
+    return { gebruiker, hash };
+  }
+  function startSessie(req: express.Request, res: express.Response, g: Gebruiker) {
+    const token = nieuwToken();
+    opslag.nieuweSessie(tokenHash(token), g.id, Date.now() + SESSIEDUUR);
+    const veilig = req.secure || req.headers["x-forwarded-proto"] === "https";
+    res.setHeader("Set-Cookie", `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict${veilig ? "; Secure" : ""}`);
+  }
+  const controleerWachtwoord = (w: unknown): string => {
+    if (typeof w !== "string" || w.length < MIN_WACHTWOORD) throw new Ongeldig(`Het wachtwoord moet minstens ${MIN_WACHTWOORD} tekens hebben.`);
+    return w;
+  };
+
+  // Verzoeken die iets wijzigen moeten van de eigen pagina komen, niet van een andere website.
+  app.use("/api", (req, res, next) => {
+    const origin = req.headers.origin;
+    if (!["GET", "HEAD"].includes(req.method) && origin) {
+      let host = "";
+      try {
+        host = new URL(origin).host;
+      } catch {
+        /* ongeldige herkomst telt als vreemd */
+      }
+      if (host !== req.headers.host) {
+        res.status(403).json({ fout: "Verzoek van een andere website geweigerd." });
+        return;
+      }
+    }
+    next();
+  });
+
+  app.get("/api/auth/ik", (req, res) => {
+    if (!metAuth) return void res.json({ ...publiek(SYSTEEM), zonderAanmelden: true });
+    const s = sessieVan(req);
+    if (!s) return void res.status(401).json({ fout: "Niet aangemeld", setup: opslag.gebruikers().length === 0 });
+    res.json(publiek(s.gebruiker));
+  });
+  // Eerste gebruik: zolang er nog geen gebruikers zijn, maakt de eerste bezoeker de beheerder aan.
+  app.post("/api/auth/setup", (req, res) => {
+    if (opslag.gebruikers().length > 0) throw new Verboden("Er is al een beheerder. Meld u aan.");
+    const naam = String(req.body?.naam ?? "").trim();
+    const email = String(req.body?.email ?? "").trim().toLowerCase();
+    if (!naam) throw new Ongeldig("Vul uw naam in.");
+    if (!geldigEmail(email)) throw new Ongeldig("Vul een geldig e-mailadres in.");
+    const g = opslag.bewaarGebruiker({ naam, email, rol: "beheerder", actief: true, administraties: "alle", wachtwoordHash: hashWachtwoord(controleerWachtwoord(req.body?.wachtwoord)), moetWijzigen: false });
+    opslag.log(g.naam, "Eerste beheerder aangemaakt", null, null, g.email);
+    startSessie(req, res, g);
+    res.json(publiek(g));
+  });
+  // Na vijf mislukte pogingen is een account een kwartier geblokkeerd.
+  const pogingen = new Map<string, { aantal: number; tot: number }>();
+  const LOOS = hashWachtwoord("geen-echt-wachtwoord");
+  app.post("/api/auth/aanmelden", (req, res) => {
+    const email = String(req.body?.email ?? "").trim().toLowerCase();
+    const wachtwoord = String(req.body?.wachtwoord ?? "");
+    const stand = pogingen.get(email);
+    if (stand && stand.aantal >= 5 && stand.tot > Date.now()) {
+      res.status(429).json({ fout: "Te veel mislukte pogingen. Probeer het over een kwartier opnieuw." });
+      return;
+    }
+    const g = opslag.gebruikers().find((x) => x.email === email && x.actief);
+    // Ook bij een onbekend account wordt een wachtwoord nagerekend, zodat de reactietijd niets verraadt.
+    const goed = klopt(wachtwoord, g?.wachtwoordHash ?? LOOS) && Boolean(g);
+    if (!g || !goed) {
+      const aantal = stand && stand.tot > Date.now() ? stand.aantal + 1 : 1;
+      pogingen.set(email, { aantal, tot: Date.now() + 15 * 60_000 });
+      if (g) opslag.log(g.naam, "Mislukte aanmelding", null, null, "");
+      res.status(401).json({ fout: "E-mailadres of wachtwoord is onjuist." });
+      return;
+    }
+    pogingen.delete(email);
+    startSessie(req, res, g);
+    opslag.log(g.naam, "Aangemeld", null, null, "");
+    res.json(publiek(g));
+  });
+  app.post("/api/auth/afmelden", (req, res) => {
+    const s = sessieVan(req);
+    if (s) opslag.beeindigSessie(s.hash);
+    res.setHeader("Set-Cookie", `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+    res.json({ ok: true });
+  });
+  app.post("/api/auth/wachtwoord", (req, res) => {
+    const s = sessieVan(req);
+    if (!s) return void res.status(401).json({ fout: "Niet aangemeld" });
+    if (!klopt(String(req.body?.huidig ?? ""), s.gebruiker.wachtwoordHash)) throw new Ongeldig("Het huidige wachtwoord is onjuist.");
+    const nieuw = controleerWachtwoord(req.body?.nieuw);
+    if (nieuw === req.body?.huidig) throw new Ongeldig("Kies een ander wachtwoord dan het huidige.");
+    opslag.bewaarGebruiker({ ...s.gebruiker, wachtwoordHash: hashWachtwoord(nieuw), moetWijzigen: false });
+    // Andere sessies van deze gebruiker vervallen.
+    opslag.beeindigSessiesVan(s.gebruiker.id, s.hash);
+    opslag.log(s.gebruiker.naam, "Wachtwoord gewijzigd", null, null, "");
+    res.json({ ok: true });
+  });
+
+  // Alles hieronder vraagt een aangemelde gebruiker.
+  app.use("/api", (req, res, next) => {
+    if (req.path.startsWith("/auth/") || !metAuth) return next();
+    const s = sessieVan(req);
+    if (!s) return void res.status(401).json({ fout: "Niet aangemeld", setup: opslag.gebruikers().length === 0 });
+    (req as Verzoek).gebruiker = s.gebruiker;
+    (req as Verzoek).sessieHash = s.hash;
+    if (s.gebruiker.moetWijzigen) return void res.status(403).json({ fout: "Wijzig eerst uw wachtwoord.", moetWijzigen: true });
+    next();
+  });
+
+  // Logboek: geslaagde wijzigingen worden vastgelegd met de naam van de gebruiker.
+  app.use("/api", (req, res, next) => {
+    if (req.method === "GET") return next();
+    const pad = req.originalUrl.split("?")[0]!;
+    res.on("finish", () => {
+      if (res.statusCode >= 400 || res.locals.geenLog) return;
+      const actie = ACTIES.find(([methode, patroon]) => methode === req.method && patroon.test(pad))?.[2];
+      if (!actie) return;
+      const naam = wie(req).naam;
+      const documentId: number | null = res.locals.documentId ?? null;
+      if (STIL.has(actie)) {
+        const laatste = opslag.logboek(documentId ? { documentId, limiet: 1 } : { limiet: 1 })[0];
+        if (laatste && laatste.actie === actie && laatste.gebruiker === naam && laatste.detail === (res.locals.detail ?? "") && Date.now() - Date.parse(laatste.tijd) < 10 * 60_000) return;
+      }
+      opslag.log(naam, actie, res.locals.adminId ?? null, documentId, res.locals.detail ?? "");
+    });
+    next();
+  });
+
+  // Toegang per administratie, centraal afgedwongen voor alle paden.
+  const weiger = (res: express.Response) => void res.status(403).json({ fout: "U heeft geen toegang tot deze administratie." });
+  app.use("/api/administraties/:id", (req, res, next) => {
+    const a = Number(req.params.id);
+    res.locals.adminId = a;
+    if (!magAdministratie(wie(req), a)) return weiger(res);
+    next();
+  });
+  app.use("/api/documenten/:id", (req, res, next) => {
+    let doc: Document | null = null;
+    try {
+      doc = opslag.document(Number(req.params.id));
+    } catch {
+      return next(); // onbekend document: het pad zelf geeft "niet gevonden"
+    }
+    res.locals.adminId = doc.adminId;
+    res.locals.documentId = doc.id;
+    res.locals.detail = doc.bestandsnaam;
+    if (!magAdministratie(wie(req), doc.adminId)) return weiger(res);
+    next();
+  });
+  app.use("/api/relaties/:id", (req, res, next) => {
+    const r = opslag.relatie(Number(req.params.id));
+    if (!r) return next();
+    res.locals.adminId = r.adminId;
+    res.locals.detail = r.naam;
+    if (!magAdministratie(wie(req), r.adminId)) return weiger(res);
+    next();
+  });
+  app.use("/api/feedback/:id", (req, res, next) => {
+    const f = opslag.feedbackItem(Number(req.params.id));
+    if (!f) return next();
+    res.locals.adminId = f.adminId;
+    res.locals.documentId = f.documentId;
+    if (!magAdministratie(wie(req), f.adminId)) return weiger(res);
+    next();
+  });
+  const alleenBeheerder = (req: express.Request) => {
+    if (wie(req).rol !== "beheerder") throw new Verboden("Alleen een beheerder kan dit.");
+  };
+
+  // ---------- Gebruikersbeheer (beheerder) ----------
+  const leesAdministraties = (v: unknown): "alle" | number[] => (v === "alle" ? "alle" : Array.isArray(v) ? [...new Set(v.map(Number).filter((n) => Number.isInteger(n) && n > 0))] : []);
+  app.get("/api/gebruikers", (req, res) => {
+    alleenBeheerder(req);
+    res.json(opslag.gebruikers().map(publiek));
+  });
+  app.post("/api/gebruikers", (req, res) => {
+    alleenBeheerder(req);
+    const naam = String(req.body?.naam ?? "").trim();
+    const email = String(req.body?.email ?? "").trim().toLowerCase();
+    if (!naam) throw new Ongeldig("Vul een naam in.");
+    if (!geldigEmail(email)) throw new Ongeldig("Vul een geldig e-mailadres in.");
+    if (opslag.gebruikers().some((g) => g.email === email)) throw new Ongeldig("Er is al een gebruiker met dit e-mailadres.");
+    const g = opslag.bewaarGebruiker({
+      naam,
+      email,
+      rol: req.body?.rol === "beheerder" ? "beheerder" : "medewerker",
+      actief: true,
+      administraties: leesAdministraties(req.body?.administraties),
+      wachtwoordHash: hashWachtwoord(controleerWachtwoord(req.body?.wachtwoord)),
+      moetWijzigen: true,
+    });
+    res.locals.detail = `${g.naam} (${g.rol})`;
+    res.json(publiek(g));
+  });
+  app.put("/api/gebruikers/:id", (req, res) => {
+    alleenBeheerder(req);
+    const g = opslag.gebruiker(id(req.params.id));
+    if (!g) throw new NietGevonden("Gebruiker niet gevonden");
+    const nieuw: Gebruiker = {
+      ...g,
+      naam: String(req.body?.naam ?? g.naam).trim() || g.naam,
+      rol: req.body?.rol === undefined ? g.rol : req.body.rol === "beheerder" ? "beheerder" : "medewerker",
+      actief: req.body?.actief === undefined ? g.actief : Boolean(req.body.actief),
+      administraties: req.body?.administraties === undefined ? g.administraties : leesAdministraties(req.body.administraties),
+    };
+    // Er moet altijd een actieve beheerder overblijven.
+    const wasBeheerder = g.rol === "beheerder" && g.actief;
+    const blijftBeheerder = nieuw.rol === "beheerder" && nieuw.actief;
+    if (wasBeheerder && !blijftBeheerder && !opslag.gebruikers().some((x) => x.id !== g.id && x.rol === "beheerder" && x.actief)) {
+      throw new Ongeldig("Dit is de enige actieve beheerder; die kan niet worden uitgezet of medewerker worden.");
+    }
+    const wijzigingen: string[] = [];
+    if (nieuw.rol !== g.rol) wijzigingen.push(`rol ${nieuw.rol}`);
+    if (nieuw.actief !== g.actief) wijzigingen.push(nieuw.actief ? "geactiveerd" : "uitgezet");
+    if (JSON.stringify(nieuw.administraties) !== JSON.stringify(g.administraties)) wijzigingen.push("toegang gewijzigd");
+    if (req.body?.wachtwoord !== undefined) {
+      nieuw.wachtwoordHash = hashWachtwoord(controleerWachtwoord(req.body.wachtwoord));
+      nieuw.moetWijzigen = true;
+      wijzigingen.push("wachtwoord opnieuw ingesteld");
+    }
+    opslag.bewaarGebruiker(nieuw);
+    // Na uitzetten of een nieuw wachtwoord vervallen alle sessies van die gebruiker.
+    if (!nieuw.actief || req.body?.wachtwoord !== undefined) opslag.beeindigSessiesVan(g.id);
+    res.locals.detail = `${nieuw.naam}${wijzigingen.length ? `: ${wijzigingen.join(", ")}` : ""}`;
+    res.json(publiek(nieuw));
+  });
+
+  // ---------- Overzicht over alle administraties en logboek ----------
+  app.get("/api/overzicht", (req, res) => {
+    res.json(
+      opslag
+        .administraties()
+        .filter((a) => magAdministratie(wie(req), a.id))
+        .map((a) => {
+          const docs = opslag.documenten(a.id);
+          const aantal = (...statussen: string[]) => docs.filter((d) => statussen.includes(d.status)).length;
+          return { id: a.id, naam: a.naam, open: aantal("controle", "gereed", "fout"), wacht: aantal("wacht"), goedgekeurd: aantal("goedgekeurd"), geexporteerd: aantal("geexporteerd"), bezig: aantal("wachtrij", "bezig"), laatst: docs[0]?.aangemaakt ?? "" };
+        }),
+    );
+  });
+  app.get("/api/logboek", (req, res) => {
+    const g = wie(req);
+    const namen = new Map(opslag.administraties().map((a) => [a.id, a.naam]));
+    const eigen = g.rol === "beheerder" ? null : [...namen.keys()].filter((a) => magAdministratie(g, a));
+    res.json(opslag.logboek({ adminIds: eigen, limiet: 500 }).map((r) => ({ ...r, administratie: r.adminId ? (namen.get(r.adminId) ?? "") : "" })));
+  });
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024, files: 50 } });
 
   const id = (v: unknown) => {
@@ -146,7 +438,8 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
           opslag.werkDocumentBij(doc.id, { extractie, boeking, aiVoorstel: boeking, gecorrigeerd: null, signaleringen, status: statusNaControle(signaleringen) });
           // Vertrouwde relatie: een voorstel zonder fout of waarschuwing wordt direct goedgekeurd.
           const relatie = relatieVan(doc.adminId, boeking);
-          if (relatie?.autoAkkoord && extractie.zekerheid === "hoog" && signaleringen.every((x) => x.niveau === "info") && keurGoed(opslag.document(doc.id))) {
+          if (relatie?.autoAkkoord && extractie.zekerheid === "hoog" && signaleringen.every((x) => x.niveau === "info") && keurGoed(opslag.document(doc.id), "automatisch")) {
+            opslag.log("Systeem", "Automatisch goedgekeurd", doc.adminId, doc.id, doc.bestandsnaam);
             opslag.werkDocumentBij(doc.id, { notitie: "Automatisch goedgekeurd: vertrouwde relatie, geen fouten of waarschuwingen." });
           }
         } catch (e) {
@@ -168,6 +461,7 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
       correcties: d.boeking && d.aiVoorstel ? verschillen(d.aiVoorstel, d.boeking, opslag.grootboek(d.adminId)) : [],
       feedback: opslag.feedback(d.adminId).filter((f) => f.documentId === d.id),
       factuureisen: d.boeking && d.extractie ? beoordeelFactuur(d.extractie, d.boeking) : null,
+      geschiedenis: opslag.logboek({ documentId: d.id, limiet: 50 }),
       exactRegels: d.boeking ? exactRegels(d.boeking, profiel, opslag.btwcodes(d.adminId)) : [],
     };
   };
@@ -178,11 +472,15 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
   });
 
   // --- Administraties ---
-  app.get("/api/administraties", (_req, res) => res.json(opslag.administraties()));
+  app.get("/api/administraties", (req, res) => res.json(opslag.administraties().filter((a) => magAdministratie(wie(req), a.id))));
   app.post("/api/administraties", (req, res) => {
+    alleenBeheerder(req);
     const naam = String(req.body?.naam ?? "").trim();
     if (!naam) throw new Ongeldig("Naam is verplicht");
-    res.json({ id: opslag.nieuweAdministratie(naam) });
+    const nieuw = opslag.nieuweAdministratie(naam);
+    res.locals.adminId = nieuw;
+    res.locals.detail = naam;
+    res.json({ id: nieuw });
   });
   app.get("/api/administraties/:id", (req, res) => {
     const a = id(req.params.id);
@@ -360,13 +658,15 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
     if (doc.status === "geexporteerd" || doc.status === "goedgekeurd") throw new Ongeldig("Dit document is al goedgekeurd. Heropen het eerst om het te wijzigen.");
     if (doc.status === "wachtrij" || doc.status === "bezig") throw new Ongeldig("Dit document wordt nog uitgelezen.");
     const boeking = leesBoeking(req.body, doc);
+    // Opslaan zonder inhoudelijke wijziging (bv. vlak voor het goedkeuren) hoort niet in het logboek.
+    if (JSON.stringify(boeking) === JSON.stringify(doc.boeking)) res.locals.geenLog = true;
     const signaleringen = controleer(doc, boeking);
     opslag.werkDocumentBij(doc.id, { boeking, signaleringen, status: doc.status === "wacht" ? "wacht" : statusNaControle(signaleringen), fout: "" });
     res.json(uitvoer(opslag.document(doc.id)));
   });
 
   /** Keurt een document goed. Geeft false terug als er nog fouten in de boeking zitten. */
-  function keurGoed(doc: Document): boolean {
+  function keurGoed(doc: Document, door: string): boolean {
     if (!doc.boeking) throw new Ongeldig("Er is nog geen boeking om goed te keuren.");
     if (doc.status === "goedgekeurd" || doc.status === "geexporteerd") throw new Ongeldig("Dit document is al goedgekeurd.");
     const boeking = doc.boeking;
@@ -415,14 +715,14 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
       if (bestaand.some((f) => f.tekst === c.tekst && f.relatieNaam === relatie.naam)) continue;
       opslag.bewaarFeedback({ adminId: doc.adminId, documentId: doc.id, bereik: "relatie", relatieNaam: relatie.naam, tekst: c.tekst, bron: "automatisch", actief: true, aangemaakt: new Date().toISOString() });
     }
-    opslag.werkDocumentBij(doc.id, { boeking: { ...boeking, relatieId: relatie.id }, signaleringen, status: "goedgekeurd", gecorrigeerd: correcties.length > 0 || doc.aanwijzing !== "", goedgekeurdOp: new Date().toISOString() });
+    opslag.werkDocumentBij(doc.id, { boeking: { ...boeking, relatieId: relatie.id }, signaleringen, status: "goedgekeurd", gecorrigeerd: correcties.length > 0 || doc.aanwijzing !== "", goedgekeurdOp: new Date().toISOString(), goedgekeurdDoor: door });
     return true;
   }
 
 
   app.post("/api/documenten/:id/goedkeuren", (req, res) => {
     const doc = opslag.document(id(req.params.id));
-    if (!keurGoed(doc)) {
+    if (!keurGoed(doc, wie(req).naam)) {
       res.status(409).json({ fout: "Los eerst de fouten op voordat u goedkeurt.", document: uitvoer(opslag.document(doc.id)) });
       return;
     }
@@ -434,7 +734,10 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
     // Oudste eerst, zodat een dubbele factuur bij het latere document wordt tegengehouden.
     for (const doc of opslag.documenten(id(req.params.id)).filter((d) => d.status === "gereed").reverse()) {
       const actueel = opslag.document(doc.id);
-      if (actueel.boeking && controleer(actueel, actueel.boeking).every((s) => s.niveau === "info") && keurGoed(actueel)) goedgekeurd++;
+      if (actueel.boeking && controleer(actueel, actueel.boeking).every((s) => s.niveau === "info") && keurGoed(actueel, wie(req).naam)) {
+        goedgekeurd++;
+        opslag.log(wie(req).naam, "Goedgekeurd", actueel.adminId, actueel.id, actueel.bestandsnaam);
+      }
     }
     res.json({ goedgekeurd });
   });
@@ -451,7 +754,7 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
     const doc = opslag.document(id(req.params.id));
     if (!doc.boeking) throw new Ongeldig("Geen boeking.");
     const signaleringen = controleer(doc, doc.boeking);
-    opslag.werkDocumentBij(doc.id, { signaleringen, status: statusNaControle(signaleringen), geexporteerdOp: "", goedgekeurdOp: "" });
+    opslag.werkDocumentBij(doc.id, { signaleringen, status: statusNaControle(signaleringen), geexporteerdOp: "", goedgekeurdOp: "", goedgekeurdDoor: "" });
     res.json(uitvoer(opslag.document(doc.id)));
   });
   app.post("/api/documenten/:id/opnieuw", (req, res) => {
@@ -601,6 +904,7 @@ export function maakApp(opslag: Opslag, extractor: Extractor, demo = false, wach
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (err instanceof NietGevonden) res.status(404).json({ fout: err.message });
     else if (err instanceof Ongeldig) res.status(400).json({ fout: err.message });
+    else if (err instanceof Verboden) res.status(403).json({ fout: err.message });
     else if (err instanceof multer.MulterError) res.status(400).json({ fout: err.code === "LIMIT_FILE_SIZE" ? "Bestand is groter dan 30 MB." : err.message });
     else {
       console.error(err);
@@ -628,12 +932,23 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const opslag = new Opslag(process.env.SCAN_DATA || path.join(hier, "..", "data"));
   const poort = Number(process.env.PORT) || 3000;
   const host = process.env.HOST || "127.0.0.1";
-  const wachtwoord = process.env.SCAN_WACHTWOORD || "";
-  if (!["127.0.0.1", "localhost", "::1"].includes(host) && !wachtwoord) {
-    console.error("De server wordt opengezet voor het netwerk (HOST) zonder wachtwoord. Stel SCAN_WACHTWOORD in en start opnieuw.");
+  // Eerste beheerder vooraf aanmaken via SCAN_BEHEERDER="e-mailadres:wachtwoord" (nodig bij openzetten voor het netwerk).
+  const beheerder = process.env.SCAN_BEHEERDER || "";
+  if (opslag.gebruikers().length === 0 && beheerder.includes(":")) {
+    const email = beheerder.slice(0, beheerder.indexOf(":")).trim().toLowerCase();
+    const wachtwoord = beheerder.slice(beheerder.indexOf(":") + 1);
+    if (!geldigEmail(email) || wachtwoord.length < MIN_WACHTWOORD) {
+      console.error(`SCAN_BEHEERDER is ongeldig: gebruik "e-mailadres:wachtwoord" met een wachtwoord van minstens ${MIN_WACHTWOORD} tekens.`);
+      process.exit(1);
+    }
+    opslag.bewaarGebruiker({ naam: "Beheerder", email, rol: "beheerder", actief: true, administraties: "alle", wachtwoordHash: hashWachtwoord(wachtwoord), moetWijzigen: true });
+    console.log(`Beheerder ${email} aangemaakt; wijzig het wachtwoord bij de eerste aanmelding.`);
+  }
+  if (!["127.0.0.1", "localhost", "::1"].includes(host) && opslag.gebruikers().length === 0) {
+    console.error('De server wordt opengezet voor het netwerk (HOST) terwijl er nog geen beheerder is. Start eerst lokaal om de beheerder aan te maken, of stel SCAN_BEHEERDER="e-mailadres:wachtwoord" in.');
     process.exit(1);
   }
-  maakApp(opslag, demo ? demoExtractor : extraheerMetClaude, demo, wachtwoord).listen(poort, host, () => {
+  maakApp(opslag, demo ? demoExtractor : extraheerMetClaude, { demo }).listen(poort, host, () => {
     console.log(`Scan & Herken draait op http://${host === "0.0.0.0" ? "localhost" : host}:${poort}${demo ? " (demomodus, zonder AI)" : ""}`);
   });
 }

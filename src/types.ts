@@ -189,6 +189,8 @@ export interface Document {
   aanwijzing: string;
   /** Notitie van de boekhouder, bv. waarom het document in de wacht staat. */
   notitie: string;
+  /** Wie het document heeft goedgekeurd (naam van de medewerker, of "automatisch"). */
+  goedgekeurdDoor: string;
   /** Tijdstip van goedkeuring (ISO), leeg als het document niet is goedgekeurd. */
   goedgekeurdOp: string;
   /** Bij goedkeuring: moest het AI-voorstel worden aangepast? null = nog niet goedgekeurd. */

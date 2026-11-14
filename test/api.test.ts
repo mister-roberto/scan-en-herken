@@ -9,7 +9,7 @@ import { maakApp } from "../src/server.ts";
 
 test("volledige doorloop: aanleveren, uitlezen, goedkeuren, exporteren", async () => {
   const map = fs.mkdtempSync(path.join(os.tmpdir(), "scan-"));
-  const server = maakApp(new Opslag(map), demoExtractor, true).listen(0);
+  const server = maakApp(new Opslag(map), demoExtractor, { demo: true, auth: false }).listen(0);
   const basis = `http://127.0.0.1:${(server.address() as { port: number }).port}/api`;
   const json = async (pad: string, methode = "GET", body?: unknown) => {
     const r = await fetch(basis + pad, { method: methode, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });

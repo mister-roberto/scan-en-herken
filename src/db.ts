@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
+import type { Gebruiker } from "./auth.ts";
 import { STANDAARD_GROOTBOEK, standaardProfiel } from "./defaults.ts";
 import type { BtwCodes } from "./exact.ts";
 import type { Boeking, Document, DocumentStatus, Extractie, Feedback, Grootboekrekening, Profiel, Relatie, Signalering } from "./types.ts";
@@ -36,6 +37,15 @@ export class Opslag {
     if (!kolommen.has("aanwijzing")) this.db.exec("ALTER TABLE documenten ADD COLUMN aanwijzing TEXT NOT NULL DEFAULT ''");
     if (!kolommen.has("goedgekeurd_op")) this.db.exec("ALTER TABLE documenten ADD COLUMN goedgekeurd_op TEXT NOT NULL DEFAULT ''");
     if (!kolommen.has("notitie")) this.db.exec("ALTER TABLE documenten ADD COLUMN notitie TEXT NOT NULL DEFAULT ''");
+    if (!kolommen.has("goedgekeurd_door")) this.db.exec("ALTER TABLE documenten ADD COLUMN goedgekeurd_door TEXT NOT NULL DEFAULT ''");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS gebruikers (id INTEGER PRIMARY KEY, gegevens TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS sessies (token_hash TEXT PRIMARY KEY, gebruiker_id INTEGER NOT NULL, verloopt INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS logboek (
+        id INTEGER PRIMARY KEY, tijd TEXT NOT NULL, gebruiker TEXT NOT NULL, admin_id INTEGER, document_id INTEGER,
+        actie TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '');
+      CREATE INDEX IF NOT EXISTS logboek_document ON logboek (document_id);
+    `);
     if (!kolommen.has("gecorrigeerd")) this.db.exec("ALTER TABLE documenten ADD COLUMN gecorrigeerd INTEGER");
     // Na een herstart staan onderbroken documenten weer in de wachtrij.
     this.db.exec("UPDATE documenten SET status = 'wachtrij' WHERE status = 'bezig'");
@@ -130,6 +140,7 @@ export class Opslag {
       aanwijzing: String(r.aanwijzing ?? ""),
       goedgekeurdOp: String(r.goedgekeurd_op ?? ""),
       notitie: String(r.notitie ?? ""),
+      goedgekeurdDoor: String(r.goedgekeurd_door ?? ""),
       gecorrigeerd: r.gecorrigeerd == null ? null : Boolean(r.gecorrigeerd),
     };
   }
@@ -147,8 +158,8 @@ export class Opslag {
       .run(adminId, bestandsnaam, mime, pad, hash, new Date().toISOString());
     return Number(r.lastInsertRowid);
   }
-  werkDocumentBij(id: number, velden: Partial<Pick<Document, "status" | "extractie" | "boeking" | "signaleringen" | "fout" | "geexporteerdOp" | "aiVoorstel" | "aanwijzing" | "gecorrigeerd" | "goedgekeurdOp" | "notitie">>) {
-    const kolommen: Record<string, string> = { geexporteerdOp: "geexporteerd_op", aiVoorstel: "ai_voorstel", goedgekeurdOp: "goedgekeurd_op" };
+  werkDocumentBij(id: number, velden: Partial<Pick<Document, "status" | "extractie" | "boeking" | "signaleringen" | "fout" | "geexporteerdOp" | "aiVoorstel" | "aanwijzing" | "gecorrigeerd" | "goedgekeurdOp" | "notitie" | "goedgekeurdDoor">>) {
+    const kolommen: Record<string, string> = { geexporteerdOp: "geexporteerd_op", aiVoorstel: "ai_voorstel", goedgekeurdOp: "goedgekeurd_op", goedgekeurdDoor: "goedgekeurd_door" };
     for (const [k, v] of Object.entries(velden)) {
       const waarde = v !== null && typeof v === "object" ? JSON.stringify(v) : typeof v === "boolean" ? Number(v) : (v as string | null);
       this.db.prepare(`UPDATE documenten SET ${kolommen[k] ?? k} = ? WHERE id = ?`).run(waarde, id);
@@ -181,10 +192,80 @@ export class Opslag {
     this.db.prepare("DELETE FROM feedback WHERE id = ?").run(id);
   }
 
+  // --- Gebruikers en sessies ---
+  gebruikers(): Gebruiker[] {
+    return this.db
+      .prepare("SELECT id, gegevens FROM gebruikers ORDER BY id")
+      .all()
+      .map((r) => ({ ...(JSON.parse(String(r.gegevens)) as Gebruiker), id: Number(r.id) }));
+  }
+  gebruiker(id: number): Gebruiker | null {
+    return this.gebruikers().find((g) => g.id === id) ?? null;
+  }
+  bewaarGebruiker(g: Omit<Gebruiker, "id"> & { id?: number }): Gebruiker {
+    const { id, ...gegevens } = g;
+    if (id) {
+      this.db.prepare("UPDATE gebruikers SET gegevens = ? WHERE id = ?").run(JSON.stringify(gegevens), id);
+      return { ...gegevens, id };
+    }
+    const res = this.db.prepare("INSERT INTO gebruikers (gegevens) VALUES (?)").run(JSON.stringify(gegevens));
+    return { ...gegevens, id: Number(res.lastInsertRowid) };
+  }
+  nieuweSessie(hash: string, gebruikerId: number, verloopt: number) {
+    this.db.prepare("DELETE FROM sessies WHERE verloopt < ?").run(Date.now());
+    this.db.prepare("INSERT INTO sessies (token_hash, gebruiker_id, verloopt) VALUES (?, ?, ?)").run(hash, gebruikerId, verloopt);
+  }
+  sessie(hash: string): { gebruikerId: number; verloopt: number } | null {
+    const r = this.db.prepare("SELECT gebruiker_id, verloopt FROM sessies WHERE token_hash = ?").get(hash);
+    return r ? { gebruikerId: Number(r.gebruiker_id), verloopt: Number(r.verloopt) } : null;
+  }
+  verlengSessie(hash: string, verloopt: number) {
+    this.db.prepare("UPDATE sessies SET verloopt = ? WHERE token_hash = ?").run(verloopt, hash);
+  }
+  beeindigSessie(hash: string) {
+    this.db.prepare("DELETE FROM sessies WHERE token_hash = ?").run(hash);
+  }
+  beeindigSessiesVan(gebruikerId: number, behalve = "") {
+    this.db.prepare("DELETE FROM sessies WHERE gebruiker_id = ? AND token_hash <> ?").run(gebruikerId, behalve);
+  }
+
+  // --- Logboek: wie deed wat en wanneer ---
+  log(gebruiker: string, actie: string, adminId: number | null, documentId: number | null, detail = "") {
+    this.db
+      .prepare("INSERT INTO logboek (tijd, gebruiker, admin_id, document_id, actie, detail) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(new Date().toISOString(), gebruiker, adminId, documentId, actie, detail);
+  }
+  logboek(filter: { adminIds?: number[] | null; documentId?: number; limiet?: number }): Logregel[] {
+    const rijen = filter.documentId
+      ? this.db.prepare("SELECT * FROM logboek WHERE document_id = ? ORDER BY id DESC LIMIT ?").all(filter.documentId, filter.limiet ?? 200)
+      : this.db.prepare("SELECT * FROM logboek ORDER BY id DESC LIMIT ?").all(filter.limiet ?? 500);
+    return rijen
+      .map((r) => ({
+        id: Number(r.id),
+        tijd: String(r.tijd),
+        gebruiker: String(r.gebruiker),
+        adminId: r.admin_id == null ? null : Number(r.admin_id),
+        documentId: r.document_id == null ? null : Number(r.document_id),
+        actie: String(r.actie),
+        detail: String(r.detail),
+      }))
+      .filter((r) => !filter.adminIds || (r.adminId !== null && filter.adminIds.includes(r.adminId)));
+  }
+
   volgendeInWachtrij(): Document | null {
     const r = this.db.prepare("SELECT * FROM documenten WHERE status = 'wachtrij' ORDER BY id LIMIT 1").get();
     return r ? this.rij(r) : null;
   }
+}
+
+export interface Logregel {
+  id: number;
+  tijd: string;
+  gebruiker: string;
+  adminId: number | null;
+  documentId: number | null;
+  actie: string;
+  detail: string;
 }
 
 export class NietGevonden extends Error {}

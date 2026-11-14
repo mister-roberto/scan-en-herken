@@ -16,6 +16,7 @@
     </label>
     <button id="nieuweAdmin" class="knop klein">+ Nieuwe administratie</button>
     <nav id="menu">
+      <a href="#/overzicht">Alle administraties</a>
       <a href="#/start">Start</a>
       <a href="#/documenten">Documenten <span class="teller" id="teller" hidden></span></a>
       <a href="#/feedback">Feedback &amp; kwaliteit</a>
@@ -26,10 +27,17 @@
       <a href="#/grootboek">Rekeningschema</a>
       <a href="#/btwcodes">Btw-codes</a>
       <a href="#/relaties">Relaties</a>
+      <div class="kop">Kantoor</div>
+      <a href="#/gebruikers" id="menuGebruikers" hidden>Gebruikers</a>
+      <a href="#/logboek">Logboek</a>
     </nav>
-    <div id="model" class="voet"></div>
+    <div class="voet">
+      <div id="wie"></div>
+      <div id="model"></div>
+    </div>
   </aside>
   <main id="inhoud"></main>
+  <div id="aanmeldvak"></div>
   <div id="lader"></div>
   <div id="melding" hidden></div>
   <script type="module" src="app.js"></script>

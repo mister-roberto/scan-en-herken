@@ -11,7 +11,7 @@ import { maakApp } from "../src/server.ts";
 test("fraudesignalen, wachtstatus, automatisch akkoord, inleesmap en splitsen", async () => {
   const map = fs.mkdtempSync(path.join(os.tmpdir(), "scan-"));
   const opslag = new Opslag(map);
-  const app = maakApp(opslag, demoExtractor, true);
+  const app = maakApp(opslag, demoExtractor, { demo: true, auth: false });
   const server = app.listen(0);
   const basis = `http://127.0.0.1:${(server.address() as { port: number }).port}/api`;
   const json = async (pad: string, methode = "GET", body?: unknown) => {
