@@ -8,7 +8,7 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning src/server.ts",
+    "start": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/server.ts",
     "demo": "SCAN_DEMO=1 node --disable-warning=ExperimentalWarning src/server.ts",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.ts",
     "typecheck": "tsc --noEmit"

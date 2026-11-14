@@ -15,6 +15,10 @@ Facturen en bonnen aanleveren, met AI laten uitlezen, omzetten in journaalposten
 
 ## Starten
 
+**Eenvoudig:** dubbelklik op `start.bat` (Windows) of voer `./start.sh` uit (Mac/Linux). De browser opent op http://localhost:3000. Zonder API-sleutel start het programma in demomodus. Voor het uitlezen met AI kopieert u `.env.voorbeeld` naar `.env` en vult u daarin de API-sleutel van Anthropic in.
+
+**Handmatig:**
+
 Vereist: Node.js 22.18 of hoger.
 
 ```bash
